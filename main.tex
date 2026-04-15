@@ -882,7 +882,7 @@ Therefore $u_t$ is parallel along $\gamma$ if and only if
     \qquad
     \dot b_t - r_t\langle a_t, v_t\rangle = 0.
 \end{equation}
-We now solve this system explicitly. By \Cref{cone geodesic equations via covariant deriv}, the quantity $q \triangleq r_t^2 v_t$ is independent of $t$. Set $c \triangleq \|q\|_2$.
+We now solve this system explicitly. By \Cref{cone geodesic equations via covariant deriv}, the quantity $q \triangleq r_t^2 v_t$ is independent of $t$. Set $c \triangleq \|q\|_2$. We provide an example of parallel transport on $\mathfrak{C}_\Omega$ in \Cref{fig:cone_pt}. The figure highlights the fact that when $\Omega \subset \mathbb{R}$ then the cone geometry in polar coordinates coincides with Euclidean geometry. 
 
 \begin{restatable}[Explicit parallel transport along cone geodesics]{prop}{} \label{cone PT explicit}
     Let $\gamma(t) = (p(t), r(t))$ be a unit speed geodesic on $\mathfrak{C}_\Omega$, and let
@@ -980,18 +980,18 @@ Then
 Thus
 \[
 \frac{d}{dt}
-\begin{pmatrix}
+\begin{bmatrix}
 x_t \\ b_t
-\end{pmatrix}
+\end{bmatrix}
 =
 \frac{c}{r_t^2}
-\begin{pmatrix}
+\begin{bmatrix}
 0 & -1 \\
 1 & 0
-\end{pmatrix}
-\begin{pmatrix}
+\end{bmatrix}
+\begin{bmatrix}
 x_t \\ b_t
-\end{pmatrix}.
+\end{bmatrix}.
 \]
 This is a planar rotation with angular velocity $c/r_t^2$, so if
 \[
@@ -1040,8 +1040,8 @@ where we used the identity $c^2 = r_0^2 - r_0^2\dot r_0^{\,2}$ coming from the u
 \begin{figure}
     \centering
     \includegraphics[width=\linewidth]{Figures/cone_parallel_transport_visualization.pdf}
-    \caption{Caption}
-    \label{fig:placeholder}
+    \caption{Visualization of geodesic parallel transport on $\mathfrak{C}_\Omega$ in polar coordinates (left) and cone coordinates (right). The visual consists of the parallel transport of $v = 0.75\partial_r$ from $(x_0, r_0) = (1.0, 0.5)$ to $(x_1, r_1) = (3.0, 1.0).$}
+    \label{fig:cone_pt}
 \end{figure}
 
 
