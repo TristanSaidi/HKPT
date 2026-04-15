@@ -437,24 +437,24 @@ and the associated lifts $\lambda_i = \Pi_{\#}^i\gamma_\pi$ are optimal for \cre
     \[\mu(s) = \mathfrak{B}\lambda(s) \qquad \text{with} \qquad \lambda(s) = Z(s; \cdot, \cdot)_\#\gamma\]
     where $Z(\cdot; z_0, z_1)$ is the geodesic interpolator described in \Cref{eq: cone geodesics}.
 \end{restatable}
-This result indicates that we can interpolate along a Hellinger-Kantorovich geodesic by lifting the source and target measures to $\mathfrak{C}_\Omega$, solving for the optimal plan, performing Wasserstein interpolation on $\mathfrak{C}_\Omega$, and projecting back via $\mathfrak{B}$.
+This result indicates that we can interpolate along a Hellinger-Kantorovich geodesic by lifting the source and target measures to $\mathfrak{C}_\Omega$, solving for the optimal plan, performing Wasserstein interpolation on $\mathfrak{C}_\Omega$, and projecting back via $\mathfrak{B}$. We provide a example of this interpolation procedure applied to two 
 
-\begin{figure}[htbp]
+\begin{figure}[htbp] \label{fig:interpolation}
      \centering
      \begin{subfigure}{\textwidth}
          \centering
-         \includegraphics[width=\linewidth]{}
-         \caption{Caption for the top figure.}
+         \includegraphics[width=\linewidth]{Figures/HK_cone_interpolation_polar.pdf}
+         \caption{Wasserstein interpolation of $(\lambda_0, \lambda_1) = \operatorname{LETLift}(\mu_0, \mu_1)$ (\Cref{alg: let lift}) on $\mathfrak{C}_\Omega$  plotted in polar coordinates.}
      \end{subfigure}
      
      \vspace{1em} % Add vertical space between figures
 
      \begin{subfigure}{\textwidth}
          \centering
-         \includegraphics[width=\linewidth]{fig2.pdf}
-         \caption{Caption for the bottom figure.}
+         \includegraphics[width=\linewidth]{Figures/HK_cone_interpolation_projected.pdf}
+         \caption{Hellinger-Kantorovich geodesic between $\mu_0, \mu_1$ obtained by projecting $\lambda_t$ from panel (a).}
      \end{subfigure}
-     \caption{Overall caption for both figures.}
+     \caption{Visualization of Hellinger-Kantorovich interpolation using the lifting procedure described in \Cref{alg: let lift}. The measures $\mu_0, \mu_1$ consist of $n_0 = 1000$ and $n_1 = 2000$ draws from Gaussian probability measures with offset means. Note that we do \textit{not} normalize the empirical measures, and thus $\mu_0(\mathbb{R})\neq \mu_1(\mathbb{R})$.}
 \end{figure}
 
 \\
