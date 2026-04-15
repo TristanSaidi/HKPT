@@ -126,7 +126,7 @@ dist = hk_distance(mu0, mu1)
 The HK distance on non-negative measures allows both transport and mass creation/destruction:
 
 ```math
-\operatorname{HK}^2(\mu_0, \mu_1)
+\text{HK}^2(\mu_0, \mu_1)
 = \inf \int_0^1 \left(\|v_t\|_{L^2(\mu_t)}^2 + 4|\beta_t|_{L^2(\mu_t)}^2\right)\,dt
 ```
 
@@ -147,7 +147,7 @@ Key insight: embed HK geodesics into Wasserstein geodesics on a cone metric spac
 - **Base space**: $\Omega$ (original sample space)
 - **Fiber**: radial coordinate $r \in (0, \infty)$
 - **Metric**: $g = dr^2 + r^2(d\theta^2)$ (warped product)
-- **Measure on cone**: $\lambda_t = (x, r_t(x))_\# \eta_t$
+- **Measure on cone**: $\lambda_t = (x, r_t(x))_{\#}\,\eta_t$
 
 The radial function implicitly captures mass growth:
 
