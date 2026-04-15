@@ -569,12 +569,12 @@ We provide a proof of \Cref{radial update} in \Cref{sec: proof of radial update}
 \end{algorithmic}
 \end{algorithm}
 
-\begin{figure}[htbp] \label{fig:interpolation}
+\begin{figure}[htbp] \label{fig:isometric_interpolation}
      \centering
      \begin{subfigure}{\textwidth}
          \centering
          \includegraphics[width=\linewidth]{Figures/HK_cone_interpolation_recursive.pdf}
-         \caption{Wasserstein interpolation of $(\lambda_0, \lambda_1) = \operatorname{LETLift}(\mu_0, \mu_1)$ (\Cref{alg: let lift}) on $\mathfrak{C}_\Omega$  plotted in polar coordinates.}
+         \caption{Wasserstein interpolation of $(\lambda_0, \lambda_1) = \operatorname{IsometricLift}(\mu_0, \mu_1)$ (\Cref{alg:isometric-lift}) on $\mathfrak{C}_\Omega$  plotted in polar coordinates.}
      \end{subfigure}
      
      \vspace{1em} % Add vertical space between figures
@@ -584,7 +584,7 @@ We provide a proof of \Cref{radial update} in \Cref{sec: proof of radial update}
          \includegraphics[width=\linewidth]{Figures/HK_cone_interpolation_recursive_projected.pdf}
          \caption{Hellinger-Kantorovich geodesic between $\mu_0, \mu_1$ obtained by projecting $\lambda_t$ from panel (a).}
      \end{subfigure}
-     \caption{Visualization of Hellinger-Kantorovich interpolation using the lifting procedure described in \Cref{alg: let lift}. The measures $\mu_0, \mu_1$ consist of $n_0 = 1000$ and $n_1 = 2000$ draws from Gaussian probability measures with offset means. Note that we do \textit{not} normalize the empirical measures, and thus $\mu_0(\mathbb{R})\neq \mu_1(\mathbb{R})$.}
+     \caption{Visualization of Hellinger-Kantorovich interpolation using the lifting procedure described in \Cref{alg:isometric-lift} under the same settings as in \Cref{fig:cone_pt}. Observe that, unlike the LET lifted interpolant in \Cref{fig:cone_pt}, the conditional radial law of the measures $\lambda_t$ are deterministic for all $t$.}
 \end{figure}
 
 Now we will show that this lifting procedure is useful in a very powerful sense. In particular, as is clear from the construction, the lifted measures have the property that the conditional radial law is deterministic. As indicated by \Cref{isometry}, we know this ensures that the maps $\mathcal{P}_{\lambda_t}: T_{\lambda_t}\mathcal{P}_2(\mathfrak{C}_\Omega) \rightarrow T_{\mu_t}\mathfrak{M}_+$ and $\mathcal{L}_{\mu_t, \lambda_t}: T_{\mu_t}\mathfrak{M}_+ \rightarrow T_{\lambda_t}\mathcal{P}_2(\mathfrak{C}_\Omega)$ are isometric inverses. 
