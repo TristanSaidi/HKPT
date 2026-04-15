@@ -66,7 +66,7 @@
 \usepackage[round]{natbib} 
 \bibliographystyle{abbrvnat}
 
-\title{On the Isometry of $(\mathfrak{M}_+(\Omega), \operatorname{HK})$ and $(\mathfrak{C}_\Omega, W_2)$}
+\title{On the Local Isometry of $(\mathfrak{M}_+(\Omega), \operatorname{HK})$ and $(\mathfrak{C}_\Omega, W_2)$}
 
 
 \author{
@@ -438,6 +438,25 @@ and the associated lifts $\lambda_i = \Pi_{\#}^i\gamma_\pi$ are optimal for \cre
     where $Z(\cdot; z_0, z_1)$ is the geodesic interpolator described in \Cref{eq: cone geodesics}.
 \end{restatable}
 This result indicates that we can interpolate along a Hellinger-Kantorovich geodesic by lifting the source and target measures to $\mathfrak{C}_\Omega$, solving for the optimal plan, performing Wasserstein interpolation on $\mathfrak{C}_\Omega$, and projecting back via $\mathfrak{B}$.
+
+\begin{figure}[htbp]
+     \centering
+     \begin{subfigure}{\textwidth}
+         \centering
+         \includegraphics[width=\linewidth]{}
+         \caption{Caption for the top figure.}
+     \end{subfigure}
+     
+     \vspace{1em} % Add vertical space between figures
+
+     \begin{subfigure}{\textwidth}
+         \centering
+         \includegraphics[width=\linewidth]{fig2.pdf}
+         \caption{Caption for the bottom figure.}
+     \end{subfigure}
+     \caption{Overall caption for both figures.}
+\end{figure}
+
 \\
 
 \noindent \textbf{Lifting Tangent Vector Fields.} Fortunately, lifting tangent vectors in a manner that is faithful to the dynamical formulation of Hellinger-Kantorovich geometry is tractable too. We'll define the vector field lifting operator as follows, 
@@ -469,7 +488,7 @@ With this definition in place, we are ready to present the following result rela
         \item and the projection operator $\mathcal{P}_\lambda$ is the isometric inverse of $\mathcal{L}_{\mathfrak{B}\lambda, \lambda}$ $\lambda$ almost everywhere -- in particular, it is an isometry from $L^2(\lambda; \mathfrak{C}_\Omega)$ equipped with the $\mathcal{P}_2(\mathfrak{C}_\Omega)$ metric tensor and $L^2(\mathfrak{B}\lambda; \Omega) \times L^2(\mathfrak{B}\lambda)$ equipped with the Hellinger-Kantorovich metric tensor. 
     \end{enumerate}
 \end{restatable}
-We provide the proof of \Cref{isometry} in \Cref{sec: proof of isometry}. This result illustrates the following important fact: if we can construct lifts of geodesics where the conditional radial law of the measures are always \textit{deterministic}, then we have an explicit isometry between $T_{\mu_t}\mathfrak{M}_+$ and $T_{\lambda_t}\mathcal{P}_2(\mathfrak{C}_\Omega)$. In the next section we will describe a general lifting procedure that is optimal in the sense of \Cref{HK cone variational prob} and satisfies this deterministic conditional radial law property.
+We provide the proof of \Cref{isometry} in \Cref{sec: proof of isometry}. This result illustrates the following important fact: if we can construct lifts of geodesics where the conditional radial law of the measures are always \textit{deterministic}, then we have an explicit isometry between $T_{\mu_t}\mathfrak{M}_+$ and $T_{\lambda_t}\mathcal{P}_2(\mathfrak{C}_\Omega)$. In the next section we will describe a general lifting procedure that is optimal in the sense of \Cref{HK cone variational prob} \textit{and} satisfies this deterministic conditional radial law property.
 
 \subsubsection{Method of Characteristics}
 
