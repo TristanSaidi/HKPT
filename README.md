@@ -147,7 +147,7 @@ Key insight: embed HK geodesics into Wasserstein geodesics on a cone metric spac
 - **Base space**: $\Omega$ (original sample space)
 - **Fiber**: radial coordinate $r \in (0, \infty)$
 - **Metric**: $g = dr^2 + r^2(d\theta^2)$ (warped product)
-- **Measure on cone**: $\lambda_t = (x, r_t(x))_{\#}\,\eta_t$
+- **Measure on cone**: $\lambda_t = (x, r_t(x))_{\\#}\,\eta_t$
 
 The radial function implicitly captures mass growth:
 
