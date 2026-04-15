@@ -458,7 +458,6 @@ This result indicates that we can interpolate along a Hellinger-Kantorovich geod
 \end{figure}
 
 \\
-
 \noindent \textbf{Lifting Tangent Vector Fields.} Fortunately, lifting tangent vectors in a manner that is faithful to the dynamical formulation of Hellinger-Kantorovich geometry is tractable too. We'll define the vector field lifting operator as follows, 
 \begin{align*}
     \mathcal{L}_{\mu, \lambda}: L^2(\mu; \mathbb{R}^d) \times L^2(\mu) \rightarrow L^2(\lambda; T\mathfrak{C}_\Omega) \quad \text{given by} \quad \mathcal{L}_{\mu, \lambda}[(v, \beta)](x,r) = (v(x), 2\beta(x)r)
@@ -569,6 +568,24 @@ We provide a proof of \Cref{radial update} in \Cref{sec: proof of radial update}
 \State \Return $(\lambda_i)_{i=0}^N$ and $(V_i)_{i=0}^{N-1}$.
 \end{algorithmic}
 \end{algorithm}
+
+\begin{figure}[htbp] \label{fig:interpolation}
+     \centering
+     \begin{subfigure}{\textwidth}
+         \centering
+         \includegraphics[width=\linewidth]{Figures/HK_cone_interpolation_polar.pdf}
+         \caption{Wasserstein interpolation of $(\lambda_0, \lambda_1) = \operatorname{LETLift}(\mu_0, \mu_1)$ (\Cref{alg: let lift}) on $\mathfrak{C}_\Omega$  plotted in polar coordinates.}
+     \end{subfigure}
+     
+     \vspace{1em} % Add vertical space between figures
+
+     \begin{subfigure}{\textwidth}
+         \centering
+         \includegraphics[width=\linewidth]{Figures/HK_cone_interpolation_projected.pdf}
+         \caption{Hellinger-Kantorovich geodesic between $\mu_0, \mu_1$ obtained by projecting $\lambda_t$ from panel (a).}
+     \end{subfigure}
+     \caption{Visualization of Hellinger-Kantorovich interpolation using the lifting procedure described in \Cref{alg: let lift}. The measures $\mu_0, \mu_1$ consist of $n_0 = 1000$ and $n_1 = 2000$ draws from Gaussian probability measures with offset means. Note that we do \textit{not} normalize the empirical measures, and thus $\mu_0(\mathbb{R})\neq \mu_1(\mathbb{R})$.}
+\end{figure}
 
 Now we will show that this lifting procedure is useful in a very powerful sense. In particular, as is clear from the construction, the lifted measures have the property that the conditional radial law is deterministic. As indicated by \Cref{isometry}, we know this ensures that the maps $\mathcal{P}_{\lambda_t}: T_{\lambda_t}\mathcal{P}_2(\mathfrak{C}_\Omega) \rightarrow T_{\mu_t}\mathfrak{M}_+$ and $\mathcal{L}_{\mu_t, \lambda_t}: T_{\mu_t}\mathfrak{M}_+ \rightarrow T_{\lambda_t}\mathcal{P}_2(\mathfrak{C}_\Omega)$ are isometric inverses. 
 
