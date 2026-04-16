@@ -37,21 +37,32 @@ The source module implementing all algorithms from the paper:
    - Rebuilds the lifted path by local LET solves, barycentric maps, and radial updates
    - Returns list of `ConeMeasure` objects and radii at each step
 
-4. **`cone_parallel_transport_explicit(a0, b0, r_vals, v_geodesic, t_eval)`**
+4. **`hk_logarithmic_map(mu0, mu1, ...)`**
+   - Returns an empirical HK tangent `(v, beta)` supported on `mu0`
+   - By default, enforces the explicit `main.tex` assumptions: map-supported LET coupling and no unmatched mass
+   - Set `allow_approximation=True` to recover the older barycentric approximation used internally by the lifting code
+
+5. **`hk_exponential_map(mu0, (v, beta), t=1.0)`**
+   - Applies the explicit empirical HK exponential map to a tangent supported on `mu0`
+   - Returns the pushed-forward empirical measure at time `t`
+
+6. **`cone_parallel_transport_explicit(a0, b0, r_vals, v_geodesic, t_eval)`**
    - Explicit Cone PT formula (Proposition, lines 887-928)
    - Handles both radial (q=0) and non-radial (q≠0) cases
    - Returns transported tangent components (a_t, b_t)
 
-5. **`hk_parallel_transport(mu0, mu1, u0, N)`**
-   - Main Algorithm: Approximate HK Parallel Transport via Cone Transport
-   - Algorithm at lines 717-749 in paper
-   - Steps:
-     1. Lift to cone via `isometric_lift`
-     2. Apply cone PT using explicit formulas
-     3. Project back to HK tangent space
-   - Returns transported tangent vector $(v, \beta)$ at `mu1`
+7. **`hk_parallel_transport(mu0, mu1, u0, N)`**
+     - Main Algorithm: Approximate HK Parallel Transport via Cone Transport
+     - Implements the stepwise cone-transport composition from Algorithm `Approximate HK Parallel Transport via Cone Transport`
+     - Steps:
+       1. Sample the discrete HK geodesic via the endpoint LET lift
+       2. Solve local HK problems between consecutive samples
+       3. Compose local cone parallel transports along the characteristic lift
+       4. Project back to the HK tangent space
+     - The intermediate Wasserstein tangent-space projection from the paper is intentionally omitted here
+     - Returns transported tangent vector $(v, \beta)$ at `mu1`
 
-6. **`hk_distance(mu0, mu1)`**
+8. **`hk_distance(mu0, mu1)`**
    - Computes approximate HK distance via LET functional
    - Equation (407): HK = sqrt(E(π*))
 

@@ -6,8 +6,9 @@ This module follows the paper's cone-lifting construction in an empirical settin
 1. solve the discrete logarithmic entropy transport (LET) problem
 2. build the induced endpoint lifts on the cone from the exact discrete marginals
 3. interpolate the lifted coupling by cone geodesics and project back to the base
-4. lift an HK tangent at the source, transport it particlewise on the cone, and
-   project the result back to the target empirical measure
+4. lift an HK tangent at the source, transport it incrementally on the cone along
+   the characteristic lift, and project the result back to the target empirical
+   measure
 
 The implementation targets empirical measures with varying total mass rather than
 the population objects in the paper, so it should be read as a discrete
@@ -124,6 +125,31 @@ class LocalHKStep:
     beta: np.ndarray
     row_mass: np.ndarray
     col_mass: np.ndarray
+
+
+def _validate_hk_tangent(
+    tangent_hk: Tuple[np.ndarray, np.ndarray],
+    measure: EmpiricalMeasure,
+) -> Tuple[np.ndarray, np.ndarray]:
+    if isinstance(tangent_hk, EmpiricalMeasure):
+        raise TypeError(
+            "hk_exponential_map expects a tangent tuple (v, beta), not a target measure. "
+            "To get the HK tangent from a source and target empirical measure, call "
+            "`hk_logarithmic_map(mu_source, mu_target)`."
+        )
+
+    if not isinstance(tangent_hk, tuple) or len(tangent_hk) != 2:
+        raise TypeError("tangent_hk must be a tuple (v, beta)")
+
+    v, beta = tangent_hk
+    v = np.asarray(v, dtype=float)
+    beta = np.asarray(beta, dtype=float)
+
+    if v.shape != (measure.n_samples, measure.d):
+        raise ValueError("v must have shape (n_samples, d)")
+    if beta.shape != (measure.n_samples,):
+        raise ValueError("beta must have shape (n_samples,)")
+    return v, beta
 
 
 # ============================================================================
@@ -513,6 +539,39 @@ def aggregate_empirical_measure(measure: EmpiricalMeasure) -> EmpiricalMeasure:
     return EmpiricalMeasure(unique_samples, weights)
 
 
+def _align_samples_to_support(
+    samples: np.ndarray,
+    support: np.ndarray,
+    tol: float = 1e-8,
+) -> np.ndarray:
+    """
+    Match each row of ``samples`` to the nearest row of ``support``.
+
+    The isometric-lift recursion only aggregates exactly coincident support points,
+    so this alignment should be exact up to floating-point noise.
+    """
+    samples = np.asarray(samples, dtype=float)
+    support = np.asarray(support, dtype=float)
+
+    if samples.ndim != 2 or support.ndim != 2:
+        raise ValueError("samples and support must be two-dimensional arrays")
+    if samples.shape[1] != support.shape[1]:
+        raise ValueError("samples and support must have the same ambient dimension")
+    if samples.shape[0] == 0:
+        return np.zeros(0, dtype=int)
+    if support.shape[0] == 0:
+        raise ValueError("cannot align to an empty support")
+
+    tree = cKDTree(support)
+    distances, indices = tree.query(samples, k=1)
+    if np.any(distances > tol):
+        raise ValueError(
+            "Failed to align empirical supports during the characteristic lift; "
+            "this indicates the local HK recursion drifted off the expected support."
+        )
+    return np.asarray(indices, dtype=int)
+
+
 def compress_empirical_measure_weighted_kmeans(
     measure: EmpiricalMeasure,
     max_atoms: int,
@@ -789,6 +848,174 @@ def _compute_local_hk_step(
     )
 
 
+def _compute_exact_hk_log_step(
+    mu_source: EmpiricalMeasure,
+    mu_target: EmpiricalMeasure,
+    pi: np.ndarray,
+    dt: float,
+) -> LocalHKStep:
+    """
+    Exact discrete HK log step under the paper's Monge-map assumptions.
+
+    This requires the LET coupling to be supported on a map and to have no
+    unmatched source or target mass, mirroring the assumptions in the explicit
+    HK log/exp formulas from ``main.tex``.
+    """
+    row_mass = pi.sum(axis=1)
+    col_mass = pi.sum(axis=0)
+    positive_rows = row_mass > _TOL
+    positive_cols = col_mass > _TOL
+
+    source_has_mass = mu_source.weights > _TOL
+    target_has_mass = mu_target.weights > _TOL
+    if not np.all(positive_rows[source_has_mass]):
+        raise ValueError(
+            "Explicit HK logarithmic map requires mu_source << pi_0; found "
+            "source atoms with positive mass but zero transported mass."
+        )
+    if not np.all(positive_cols[target_has_mass]):
+        raise ValueError(
+            "Explicit HK logarithmic map requires mu_target << pi_1; found "
+            "target atoms with positive mass but zero incoming transported mass."
+        )
+
+    row_counts = np.count_nonzero(pi > _TOL, axis=1)
+    if np.any(row_counts[source_has_mass] > 1):
+        raise ValueError(
+            "Explicit HK logarithmic map requires the LET coupling to be supported "
+            "on a map. The current optimal coupling splits source mass across "
+            "multiple target atoms. Use allow_approximation=True to recover the "
+            "previous barycentric approximation."
+        )
+
+    target_indices = np.full(mu_source.n_samples, -1, dtype=int)
+    if np.any(positive_rows):
+        target_indices[positive_rows] = np.argmax(pi[positive_rows], axis=1)
+
+    map_positions = mu_source.samples.copy()
+    map_positions[positive_rows] = mu_target.samples[target_indices[positive_rows]]
+
+    u_source = np.zeros(mu_source.n_samples, dtype=float)
+    u_source[positive_rows] = mu_source.weights[positive_rows] / row_mass[positive_rows]
+
+    u_target = np.zeros(mu_target.n_samples, dtype=float)
+    u_target[positive_cols] = mu_target.weights[positive_cols] / col_mass[positive_cols]
+
+    q = np.zeros(mu_source.n_samples, dtype=float)
+    valid_q = positive_rows & (u_source > _TOL)
+    q[valid_q] = np.sqrt(u_target[target_indices[valid_q]] / u_source[valid_q])
+
+    displacement = map_positions - mu_source.samples
+    distance = np.linalg.norm(displacement, axis=1)
+
+    v = np.zeros_like(mu_source.samples)
+    moving = distance > _TOL
+    if np.any(moving):
+        speed_factor = (q[moving] * np.sin(distance[moving])) / (dt * distance[moving])
+        v[moving] = speed_factor[:, np.newaxis] * displacement[moving]
+
+    beta = 0.5 / dt * (q * np.cos(distance) - 1.0)
+    return LocalHKStep(
+        map_positions=map_positions,
+        q=q,
+        v=v,
+        beta=beta,
+        row_mass=row_mass,
+        col_mass=col_mass,
+    )
+
+
+def hk_logarithmic_map(
+    mu_source: EmpiricalMeasure,
+    mu_target: EmpiricalMeasure,
+    let_solver: str = "pot_mm",
+    let_max_iterations: int = 500,
+    let_stop_threshold: float = 1e-8,
+    let_reg_m: float = 1.0,
+    dt: float = 1.0,
+    allow_approximation: bool = False,
+    return_step: bool = False,
+):
+    """
+    Empirical HK logarithmic map from ``mu_source`` to ``mu_target``.
+
+    This exposes the explicit source-supported HK tangent from ``main.tex`` when
+    the LET coupling is supported on a map and there is no unmatched mass. If
+    those assumptions fail, the function raises by default because the explicit
+    HK log/exp identities need not hold. Set ``allow_approximation=True`` to use
+    the barycentric empirical approximation employed internally by the
+    isometric-lift and parallel-transport routines.
+
+    The returned tangent ``(v, beta)`` is supported on the atoms of
+    ``mu_source``. The optional ``dt`` parameter rescales the tangent so that it
+    generates the local step over a time horizon of length ``dt``.
+    """
+    if dt <= 0:
+        raise ValueError("dt must be positive")
+
+    pi, _ = solve_let_unbalanced_transport(
+        mu_source,
+        mu_target,
+        max_iterations=let_max_iterations,
+        method=let_solver,
+        stop_threshold=let_stop_threshold,
+        reg_m=let_reg_m,
+    )
+    try:
+        local_step = _compute_exact_hk_log_step(mu_source, mu_target, pi, dt)
+    except ValueError:
+        if not allow_approximation:
+            raise
+        local_step = _compute_local_hk_step(mu_source, mu_target, pi, dt)
+    tangent = (local_step.v, local_step.beta)
+    if return_step:
+        return tangent, local_step
+    return tangent
+
+
+def hk_exponential_map(
+    mu_source: EmpiricalMeasure,
+    tangent_hk: Tuple[np.ndarray, np.ndarray],
+    t: float = 1.0,
+    aggregate: bool = True,
+) -> EmpiricalMeasure:
+    """
+    Push an empirical HK tangent forward via the explicit closed-form HK exp map.
+
+    The input tangent is assumed to use the same normalization as the rest of
+    this module, namely the one induced by the continuity-reaction equation
+    ``partial_t mu + div(mu v) = 4 beta mu`` and the cone lifting
+    ``(v, beta) -> (v, 2 beta r)``.
+    """
+    if t < 0:
+        raise ValueError("t must be non-negative")
+
+    v, beta = _validate_hk_tangent(tangent_hk, mu_source)
+    speeds = np.linalg.norm(v, axis=1)
+
+    a_t = t * speeds
+    b_t = 1.0 + 2.0 * t * beta
+    q_t = np.sqrt(a_t**2 + b_t**2)
+    phi_t = np.arctan2(a_t, b_t)
+
+    transported_samples = mu_source.samples.copy()
+    moving = speeds > _TOL
+    if np.any(moving):
+        directions = np.zeros_like(v)
+        directions[moving] = v[moving] / speeds[moving, np.newaxis]
+        transported_samples[moving] += directions[moving] * phi_t[moving, np.newaxis]
+
+    transported_weights = mu_source.weights * q_t**2
+    positive = transported_weights > _TOL
+    image = EmpiricalMeasure(
+        transported_samples[positive],
+        transported_weights[positive],
+    )
+    if aggregate:
+        return aggregate_empirical_measure(image)
+    return image
+
+
 def isometric_lift(
     mu0: EmpiricalMeasure,
     mu1: EmpiricalMeasure,
@@ -1046,44 +1273,92 @@ def hk_parallel_transport(
     let_reg_m: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Empirical HK parallel transport via endpoint cone lifts and cone transport.
+    Empirical HK parallel transport via the paper's stepwise cone transport scheme.
 
-    `N` is kept for API compatibility with the previous implementation. The
-    transport itself is computed on the exact lifted endpoint coupling, while
-    `isometric_lift` uses `N` to sample the intermediate cone path.
+    This follows Algorithm ``Approximate HK parallel transport via cone
+    transport`` in ``main.tex``: compute the discrete HK geodesic samples from the
+    endpoint LET lift, solve the local HK problems between consecutive projected
+    samples, lift the source tangent, and compose the local cone parallel
+    transports along the characteristic lift.
+
+    The Wasserstein tangent projection ``Pi_{lambda_t}`` appearing after each
+    local cone transport step in the paper is intentionally omitted here, per the
+    requested scope.
     """
     if N <= 0:
         raise ValueError("N must be positive")
 
-    pi, _ = solve_let_unbalanced_transport(
+    dt = 1.0 / N
+    endpoint_lambdas, _ = let_lift(
         mu0,
         mu1,
-        max_iterations=let_max_iterations,
-        method=let_solver,
-        stop_threshold=let_stop_threshold,
-        reg_m=let_reg_m,
+        N,
+        let_solver=let_solver,
+        let_max_iterations=let_max_iterations,
+        let_stop_threshold=let_stop_threshold,
+        let_reg_m=let_reg_m,
     )
-    coupling = build_optimal_lifted_coupling(mu0, mu1, pi)
-    lambda0 = coupling.lambda_source()
-    lambda1 = coupling.lambda_target()
+    target_base_path = [
+        aggregate_empirical_measure(project_cone_measure(cone_measure))
+        for cone_measure in endpoint_lambdas
+    ]
 
-    U0 = lift_tangent(u0, mu0, lambda0, atom_indices=coupling.source_indices)
-    U1 = np.zeros_like(U0)
+    current_base = EmpiricalMeasure(mu0.samples.copy(), mu0.weights.copy())
+    current_lambda = ConeMeasure(
+        current_base.samples.copy(),
+        np.ones(current_base.n_samples, dtype=float),
+        current_base.weights.copy(),
+    )
+    transported_tangent = lift_tangent(u0, current_base, current_lambda)
 
-    for idx in range(coupling.weights.shape[0]):
-        a1, b1 = cone_parallel_transport_explicit(
-            U0[idx, :-1],
-            U0[idx, -1],
-            (coupling.source_positions[idx], coupling.source_radii[idx]),
-            (coupling.target_positions[idx], coupling.target_radii[idx]),
+    for k in range(N):
+        target_base = target_base_path[k + 1]
+        pi, _ = solve_let_unbalanced_transport(
+            current_base,
+            target_base,
+            max_iterations=let_max_iterations,
+            method=let_solver,
+            stop_threshold=let_stop_threshold,
+            reg_m=let_reg_m,
         )
-        U1[idx, :-1] = a1
-        U1[idx, -1] = b1
+        local_step = _compute_local_hk_step(current_base, target_base, pi, dt)
+        atom_to_base = _align_samples_to_support(current_lambda.samples, current_base.samples)
 
+        next_positions = local_step.map_positions[atom_to_base]
+        next_radii = current_lambda.radii * local_step.q[atom_to_base]
+        next_tangent = np.zeros_like(transported_tangent)
+
+        for idx in range(current_lambda.n_samples):
+            a1, b1 = cone_parallel_transport_explicit(
+                transported_tangent[idx, :-1],
+                transported_tangent[idx, -1],
+                (current_lambda.samples[idx], current_lambda.radii[idx]),
+                (next_positions[idx], next_radii[idx]),
+            )
+            next_tangent[idx, :-1] = a1
+            next_tangent[idx, -1] = b1
+
+        # The paper inserts the Wasserstein tangent-space projection Pi_{lambda_t}
+        # after each local transport step. We intentionally omit that projection
+        # here, per the requested scope, and keep only the pointwise cone transport.
+        current_lambda = ConeMeasure(
+            next_positions,
+            next_radii,
+            current_lambda.weights.copy(),
+        )
+        transported_tangent = next_tangent
+        current_base = aggregate_empirical_measure(project_cone_measure(current_lambda))
+
+    if current_lambda.n_samples == mu1.n_samples and np.allclose(
+        current_lambda.samples, mu1.samples, atol=1e-8, rtol=0.0
+    ):
+        return project_tangent(transported_tangent, current_lambda)
+
+    atom_indices = _align_samples_to_support(current_lambda.samples, mu1.samples)
     return project_tangent(
-        U1,
-        lambda1,
-        atom_indices=coupling.target_indices,
+        transported_tangent,
+        current_lambda,
+        atom_indices=atom_indices,
         n_base_points=mu1.n_samples,
     )
 
