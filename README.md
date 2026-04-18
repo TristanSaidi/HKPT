@@ -21,10 +21,11 @@ The source module implementing all algorithms from the paper:
 #### Main Functions
 
 1. **`solve_let_unbalanced_transport(mu0, mu1, ..., method='pot_mm')`**
-   - Solves the discrete Logarithmic Entropy Transport (LET) problem
-   - Default backend uses POT's non-entropic `mm_unbalanced` solver
-   - Alternate backend `method='lbfgsb'` keeps the in-module dense direct solver
-   - Returns optimal coupling and cost matrix
+    - Solves the discrete Logarithmic Entropy Transport (LET) problem
+    - Default backend uses POT's non-entropic `mm_unbalanced` solver
+    - Optional entropic backend `method='pot_sinkhorn'` uses POT's unbalanced Sinkhorn solver with `entropy_reg`
+    - Alternate backend `method='lbfgsb'` keeps the in-module dense direct solver
+    - Returns optimal coupling and cost matrix
 
 2. **`let_lift(mu0, mu1, N)`**
    - Builds the endpoint LET cone lift and its cone geodesic interpolation
@@ -34,37 +35,45 @@ The source module implementing all algorithms from the paper:
 3. **`isometric_lift(mu0, mu1, N)`**
    - Implements the recursive isometric-lift algorithm box from `main.tex`
    - Uses the endpoint LET lift only to obtain the intermediate base measures
+   - Supports the same LET backend options as the log map, including `method='pot_sinkhorn'` with `entropy_reg`
    - Rebuilds the lifted path by local LET solves, barycentric maps, and radial updates
    - Returns list of `ConeMeasure` objects and radii at each step
 
 4. **`hk_logarithmic_map(mu0, mu1, ...)`**
    - Returns an empirical HK tangent `(v, beta)` supported on `mu0`
    - By default, enforces the explicit `main.tex` assumptions: map-supported LET coupling and no unmatched mass
-   - Set `allow_approximation=True` to recover the older barycentric approximation used internally by the lifting code
+   - Set `allow_approximation=True` and choose `approximation_mode='barycentric'` or `'argmax'` for empirical non-map couplings
 
 5. **`hk_exponential_map(mu0, (v, beta), t=1.0)`**
    - Applies the explicit empirical HK exponential map to a tangent supported on `mu0`
    - Returns the pushed-forward empirical measure at time `t`
 
 6. **`cone_parallel_transport_explicit(a0, b0, r_vals, v_geodesic, t_eval)`**
-   - Explicit Cone PT formula (Proposition, lines 887-928)
-   - Handles both radial (q=0) and non-radial (q≠0) cases
-   - Returns transported tangent components (a_t, b_t)
+    - Explicit Cone PT formula (Proposition, lines 887-928)
+    - Handles both radial (q=0) and non-radial (q≠0) cases
+    - Returns transported tangent components (a_t, b_t)
 
-7. **`hk_parallel_transport(mu0, mu1, u0, N)`**
-     - Main Algorithm: Approximate HK Parallel Transport via Cone Transport
-     - Implements the stepwise cone-transport composition from Algorithm `Approximate HK Parallel Transport via Cone Transport`
-     - Steps:
-       1. Sample the discrete HK geodesic via the endpoint LET lift
+7. **`cone_wasserstein_parallel_transport(lambda_list, lifted_tangents, cone_tangent0, ...)`**
+    - Exposes the cone-side Wasserstein PT recursion used internally by `hk_parallel_transport`
+    - Takes a lifted path, lifted step tangents, and an initial cone tangent
+    - Useful for debugging the cone transport directly without projecting back to HK
+    - Optional `return_path=True` returns the transported cone tangent at each step together with the mapped intermediate cone measures
+
+8. **`hk_parallel_transport(mu0, mu1, u0, N)`**
+       - Main Algorithm: Approximate HK Parallel Transport via Cone Transport
+       - Supports entropic LET regularization through `let_solver='pot_sinkhorn'` and `entropy_reg=...`
+       - Implements the stepwise cone-transport composition from Algorithm `Approximate HK Parallel Transport via Cone Transport`
+      - Steps:
+        1. Sample the discrete HK geodesic via the endpoint LET lift
        2. Solve local HK problems between consecutive samples
        3. Compose local cone parallel transports along the characteristic lift
        4. Project back to the HK tangent space
      - The intermediate Wasserstein tangent-space projection from the paper is intentionally omitted here
      - Returns transported tangent vector $(v, \beta)$ at `mu1`
 
-8. **`hk_distance(mu0, mu1)`**
-   - Computes approximate HK distance via LET functional
-   - Equation (407): HK = sqrt(E(π*))
+9. **`hk_distance(mu0, mu1)`**
+    - Computes approximate HK distance via LET functional
+    - Equation (407): HK = sqrt(E(π*))
 
 #### Lifting and Projection
 
@@ -86,7 +95,7 @@ The source module implementing all algorithms from the paper:
 
 Requirements:
 ```bash
-pip install numpy scipy matplotlib POT
+pip install numpy scipy matplotlib POT tqdm
 ```
 
 The default LET backend uses POT. To force the older in-module solver instead,
