@@ -32,11 +32,12 @@ The source module implementing all algorithms from the paper:
    - Useful when you want the direct endpoint lift induced by a single LET solve
    - Returns list of `ConeMeasure` objects and radii at each sampled time
 
-3. **`isometric_lift(mu0, mu1, N)`**
+3. **`isometric_lift(mu0, mu1, N, ..., radial_aggregation_mode='mass_preserving')`**
    - Implements the recursive isometric-lift algorithm box from `main.tex`
    - Uses the endpoint LET lift only to obtain the intermediate base measures
    - Supports the same LET backend options as the log map, including `method='pot_sinkhorn'` with `entropy_reg`
-   - Rebuilds the lifted path by local LET solves, barycentric maps, and radial updates
+   - Rebuilds the lifted path by local LET solves and plan-level radial aggregation onto the exact next base support
+   - `radial_aggregation_mode='mass_preserving'` preserves projected base mass when multiple transported atoms merge; `radial_aggregation_mode='mean_radius'` averages incoming transported radii directly
    - Returns list of `ConeMeasure` objects and radii at each step
 
 4. **`hk_logarithmic_map(mu0, mu1, ...)`**
@@ -59,11 +60,13 @@ The source module implementing all algorithms from the paper:
     - Useful for debugging the cone transport directly without projecting back to HK
     - Optional `return_path=True` returns the transported cone tangent at each step together with the mapped intermediate cone measures
 
-8. **`hk_parallel_transport(mu0, mu1, u0, N)`**
-       - Main Algorithm: Approximate HK Parallel Transport via Cone Transport
-       - Supports entropic LET regularization through `let_solver='pot_sinkhorn'` and `entropy_reg=...`
-       - Implements the stepwise cone-transport composition from Algorithm `Approximate HK Parallel Transport via Cone Transport`
-      - Steps:
+8. **`hk_parallel_transport(mu0, mu1, u0, N, ..., radial_aggregation_mode='mass_preserving')`**
+        - Main Algorithm: Approximate HK Parallel Transport via Cone Transport
+        - Supports entropic LET regularization through `let_solver='pot_sinkhorn'` and `entropy_reg=...`
+        - Implements the stepwise cone-transport composition from Algorithm `Approximate HK Parallel Transport via Cone Transport`
+       - Uses the retained local LET couplings from `isometric_lift(...)`; it does not expose or use `approximation_mode`
+       - Pass `radial_aggregation_mode='mean_radius'` to use direct averaging of incoming transported radii in the finite-sample isometric lift
+       - Steps:
         1. Sample the discrete HK geodesic via the endpoint LET lift
        2. Solve local HK problems between consecutive samples
        3. Compose local cone parallel transports along the characteristic lift

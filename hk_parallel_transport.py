@@ -17,6 +17,7 @@ approximation of the continuous theory.
 
 from dataclasses import dataclass
 from typing import Callable, Optional, Tuple
+import warnings
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment, minimize
@@ -139,6 +140,7 @@ class LocalHKStep:
     beta: np.ndarray
     row_mass: np.ndarray
     col_mass: np.ndarray
+    coupling: Optional[np.ndarray] = None
 
 
 def _validate_hk_tangent(
@@ -609,7 +611,7 @@ def aggregate_empirical_measure(measure: EmpiricalMeasure) -> EmpiricalMeasure:
     return EmpiricalMeasure(unique_samples, weights)
 
 
-def _align_samples_to_support(
+def align_samples_to_support(
     samples: np.ndarray,
     support: np.ndarray,
     tol: float = 1e-8,
@@ -731,12 +733,14 @@ def _aggregate_pushforward_cone(
     mapped_samples: np.ndarray,
     reference_weights: np.ndarray,
     updated_radii: np.ndarray,
+    radial_aggregation_mode: str = "mass_preserving",
 ) -> ConeMeasure:
     """
     Aggregate an exact pushforward when multiple source atoms share a destination.
 
     The new reference mass is the sum of pushed reference masses, and the new
-    deterministic radius is chosen so that the projected base mass is preserved.
+    deterministic radius is chosen from the incoming transported radii according
+    to ``radial_aggregation_mode``.
     """
     mapped_samples = np.asarray(mapped_samples, dtype=float)
     reference_weights = np.asarray(reference_weights, dtype=float)
@@ -746,20 +750,110 @@ def _aggregate_pushforward_cone(
         dim = mapped_samples.shape[1] if mapped_samples.ndim == 2 else 0
         return ConeMeasure(np.zeros((0, dim)), np.zeros(0), np.zeros(0))
 
+    if radial_aggregation_mode not in {"mass_preserving", "mean_radius"}:
+        raise ValueError(
+            "radial_aggregation_mode must be 'mass_preserving' or 'mean_radius'"
+        )
+
     unique_samples, inverse = _preserve_order_unique_rows(mapped_samples)
     reference_mass = np.bincount(
         inverse, weights=reference_weights, minlength=len(unique_samples)
     )
-    projected_mass = np.bincount(
-        inverse,
-        weights=reference_weights * updated_radii**2,
-        minlength=len(unique_samples),
-    )
 
     new_radii = np.zeros(len(unique_samples), dtype=float)
     positive = reference_mass > _TOL
-    new_radii[positive] = np.sqrt(projected_mass[positive] / reference_mass[positive])
+    if radial_aggregation_mode == "mass_preserving":
+        projected_mass = np.bincount(
+            inverse,
+            weights=reference_weights * updated_radii**2,
+            minlength=len(unique_samples),
+        )
+        new_radii[positive] = np.sqrt(projected_mass[positive] / reference_mass[positive])
+    else:
+        mean_radius = np.bincount(
+            inverse,
+            weights=reference_weights * updated_radii,
+            minlength=len(unique_samples),
+        )
+        new_radii[positive] = mean_radius[positive] / reference_mass[positive]
     return ConeMeasure(unique_samples, new_radii, reference_mass)
+
+
+def _pushforward_cone_through_local_plan(
+    current_lambda: ConeMeasure,
+    mu_source: EmpiricalMeasure,
+    mu_target: EmpiricalMeasure,
+    pi: np.ndarray,
+    radial_aggregation_mode: str = "mass_preserving",
+) -> ConeMeasure:
+    """
+    Push the current lift forward through a local LET coupling and aggregate onto
+    the exact target base support.
+
+    Each target base atom receives one cone atom. Incoming reference masses and
+    transported radii are aggregated according to the local coupling weights.
+    """
+    pi = np.asarray(pi, dtype=float)
+    if current_lambda.n_samples != mu_source.n_samples:
+        raise ValueError("current_lambda and mu_source must have the same number of atoms")
+    if pi.shape != (mu_source.n_samples, mu_target.n_samples):
+        raise ValueError("pi must have shape (mu_source.n_samples, mu_target.n_samples)")
+    if radial_aggregation_mode not in {"mass_preserving", "mean_radius"}:
+        raise ValueError(
+            "radial_aggregation_mode must be 'mass_preserving' or 'mean_radius'"
+        )
+
+    row_mass = pi.sum(axis=1)
+    col_mass = pi.sum(axis=0)
+    positive_rows = row_mass > _TOL
+    positive_cols = col_mass > _TOL
+
+    u_source = np.zeros(mu_source.n_samples, dtype=float)
+    u_source[positive_rows] = mu_source.weights[positive_rows] / row_mass[positive_rows]
+    u_target = np.zeros(mu_target.n_samples, dtype=float)
+    u_target[positive_cols] = mu_target.weights[positive_cols] / col_mass[positive_cols]
+
+    next_reference_weights = np.zeros(mu_target.n_samples, dtype=float)
+    radii_numer = np.zeros(mu_target.n_samples, dtype=float)
+    projected_mass = np.zeros(mu_target.n_samples, dtype=float)
+
+    support = np.argwhere(pi > _TOL)
+    for source_idx, target_idx in support:
+        edge_reference_mass = (
+            current_lambda.weights[source_idx] * pi[source_idx, target_idx] / row_mass[source_idx]
+        )
+        q_edge = np.sqrt(max(u_target[target_idx] / u_source[source_idx], 0.0))
+        transported_radius = current_lambda.radii[source_idx] * q_edge
+
+        next_reference_weights[target_idx] += edge_reference_mass
+        radii_numer[target_idx] += edge_reference_mass * transported_radius
+        projected_mass[target_idx] += edge_reference_mass * transported_radius**2
+
+    next_radii = np.zeros(mu_target.n_samples, dtype=float)
+    positive_targets = next_reference_weights > _TOL
+    if radial_aggregation_mode == "mass_preserving":
+        next_radii[positive_targets] = np.sqrt(
+            projected_mass[positive_targets] / next_reference_weights[positive_targets]
+        )
+    else:
+        next_radii[positive_targets] = (
+            radii_numer[positive_targets] / next_reference_weights[positive_targets]
+        )
+
+    missing_targets = (mu_target.weights > _TOL) & ~positive_targets
+    if np.any(missing_targets):
+        warnings.warn(
+            "Local LET plan assigned zero incoming coupling mass to target atoms with "
+            "positive base mass during isometric_lift; corresponding lifted atoms were "
+            "left at zero weight/radius.",
+            RuntimeWarning,
+        )
+
+    return ConeMeasure(
+        mu_target.samples.copy(),
+        next_radii,
+        next_reference_weights,
+    )
 
 
 def build_optimal_lifted_coupling(
@@ -964,6 +1058,7 @@ def _compute_local_hk_step(
         beta=beta,
         row_mass=row_mass,
         col_mass=col_mass,
+        coupling=np.asarray(pi, dtype=float),
     )
 
 
@@ -1041,6 +1136,7 @@ def _compute_exact_hk_log_step(
         beta=beta,
         row_mass=row_mass,
         col_mass=col_mass,
+        coupling=np.asarray(pi, dtype=float),
     )
 
 
@@ -1157,6 +1253,7 @@ def isometric_lift(
     let_stop_threshold: float = 1e-8,
     let_reg_m: float = 1.0,
     approximation_mode: str = "barycentric",
+    radial_aggregation_mode: str = "mass_preserving",
     compression_max_atoms: Optional[int] = None,
     compression_kmeans_iterations: int = 20,
     return_tangents: bool = False,
@@ -1167,7 +1264,14 @@ def isometric_lift(
 
     The endpoint LET lift is used only to produce target base measures at the
     sampled times. The lifted path itself is then rebuilt recursively using the
-    barycentric local maps and radial updates from the isometric-lift algorithm.
+    local LET plans and radial updates from the isometric-lift algorithm. In the
+    finite-sample setting, each next lifted measure is supported exactly on the
+    next base support, and incoming radial contributions are aggregated there
+    according to the local coupling weights.
+    When multiple source atoms land on the same target point, the finite-sample
+    radial merge is controlled by ``radial_aggregation_mode``:
+    ``'mass_preserving'`` preserves projected base mass, while
+    ``'mean_radius'`` averages the incoming transported radii directly.
     """
     if N <= 0:
         raise ValueError("N must be positive")
@@ -1231,13 +1335,14 @@ def isometric_lift(
             lift_tangent((local_step.v, local_step.beta), current_base, current_lambda)
         )
 
-        updated_radii = current_lambda.radii * local_step.q
-        current_lambda = _aggregate_pushforward_cone(
-            local_step.map_positions,
-            current_lambda.weights,
-            updated_radii,
+        current_lambda = _pushforward_cone_through_local_plan(
+            current_lambda,
+            current_base,
+            target_base,
+            pi,
+            radial_aggregation_mode=radial_aggregation_mode,
         )
-        current_base = aggregate_empirical_measure(project_cone_measure(current_lambda))
+        current_base = target_base
 
         lambda_list.append(current_lambda)
         radii_list.append(current_lambda.radii.copy())
@@ -1503,6 +1608,59 @@ def _aggregate_cone_tangent_under_deterministic_map(
     return aggregated
 
 
+def _aggregate_cone_tangent_under_plan_coupling(
+    cone_tangent: np.ndarray,
+    current_lambda: ConeMeasure,
+    next_lambda: ConeMeasure,
+    coupling: np.ndarray,
+) -> np.ndarray:
+    """
+    Aggregate cone tangent vectors onto the next lifted measure using the local
+    LET coupling retained during the isometric lift.
+
+    The source cone mass is split across target atoms in proportion to the
+    coupling row, parallel transported to the target cone atoms of
+    ``next_lambda``, and then averaged using those split reference masses.
+    """
+    cone_tangent = np.asarray(cone_tangent, dtype=float)
+    coupling = np.asarray(coupling, dtype=float)
+
+    if cone_tangent.shape != (current_lambda.n_samples, current_lambda.d + 1):
+        raise ValueError("cone_tangent must match current_lambda")
+    if coupling.shape != (current_lambda.n_samples, next_lambda.n_samples):
+        raise ValueError("coupling shape must match current and next lifted measures")
+
+    row_mass = coupling.sum(axis=1)
+    valid_rows = row_mass > _TOL
+
+    aggregated = np.zeros((next_lambda.n_samples, current_lambda.d + 1), dtype=float)
+    target_reference_mass = np.zeros(next_lambda.n_samples, dtype=float)
+
+    support = np.argwhere(coupling > _TOL)
+    for source_idx, target_idx in support:
+        if row_mass[source_idx] <= _TOL:
+            continue
+
+        edge_reference_mass = (
+            current_lambda.weights[source_idx]
+            * coupling[source_idx, target_idx]
+            / row_mass[source_idx]
+        )
+        a1, b1 = cone_parallel_transport_explicit(
+            cone_tangent[source_idx, :-1],
+            cone_tangent[source_idx, -1],
+            (current_lambda.samples[source_idx], current_lambda.radii[source_idx]),
+            (next_lambda.samples[target_idx], next_lambda.radii[target_idx]),
+        )
+        aggregated[target_idx, :-1] += edge_reference_mass * a1
+        aggregated[target_idx, -1] += edge_reference_mass * b1
+        target_reference_mass[target_idx] += edge_reference_mass
+
+    positive_targets = target_reference_mass > _TOL
+    aggregated[positive_targets] /= target_reference_mass[positive_targets, np.newaxis]
+    return aggregated
+
+
 def _resolve_cone_atom_map(
     mapped_lambda: ConeMeasure,
     target_lambda: ConeMeasure,
@@ -1727,8 +1885,9 @@ def cone_parallel_transport_explicit(
 
 def cone_wasserstein_parallel_transport(
     lambda_list: list,
-    lifted_tangents: list,
+    lifted_tangents: Optional[list],
     cone_tangent0: np.ndarray,
+    couplings: Optional[list] = None,
     step_size: Optional[float] = None,
     alignment_tol: float = 1e-2,
     return_path: bool = False,
@@ -1736,16 +1895,24 @@ def cone_wasserstein_parallel_transport(
 ):
     """
     Run the cone-side Wasserstein parallel transport recursion induced by a
-    lifted path and its lifted step tangents.
+    lifted path.
 
     This exposes the inner transport loop used by ``hk_parallel_transport`` so
     the cone dynamics can be inspected without projecting back to the HK tangent
-    space.
+    space. If ``couplings`` is provided, each step uses the retained local LET
+    coupling to split source reference mass, parallel transport edgewise, and
+    aggregate onto the next lifted support. Otherwise it falls back to the
+    tangent-induced deterministic map update.
     """
     if len(lambda_list) == 0:
         raise ValueError("lambda_list must be non-empty")
-    if len(lifted_tangents) != len(lambda_list) - 1:
+    n_steps = len(lambda_list) - 1
+    if lifted_tangents is not None and len(lifted_tangents) != n_steps:
         raise ValueError("lifted_tangents must have length len(lambda_list) - 1")
+    if couplings is not None and len(couplings) != len(lambda_list) - 1:
+        raise ValueError("couplings must have length len(lambda_list) - 1")
+    if couplings is None and lifted_tangents is None:
+        raise ValueError("Either couplings or lifted_tangents must be provided")
 
     current_lambda = lambda_list[0]
     cone_tangent0 = np.asarray(cone_tangent0, dtype=float)
@@ -1764,23 +1931,39 @@ def cone_wasserstein_parallel_transport(
     tangent_path = [transported_tangent.copy()] if return_path else None
     mapped_lambda_path = [] if return_path else None
     atom_index_path = [] if return_path else None
+    coupling_path = [] if return_path else None
 
-    for k, lifted_tangent in enumerate(lifted_tangents):
-        lifted_tangent = np.asarray(lifted_tangent, dtype=float)
+    for k in range(n_steps):
+        if show_progress:
+            print(f"Transporting step {k + 1}/{n_steps}...")
+
+        next_lambda = lambda_list[k + 1]
+        if couplings is not None:
+            transported_tangent = _aggregate_cone_tangent_under_plan_coupling(
+                transported_tangent,
+                current_lambda,
+                next_lambda,
+                couplings[k],
+            )
+            current_lambda = next_lambda
+
+            if return_path:
+                tangent_path.append(transported_tangent.copy())
+                mapped_lambda_path.append(next_lambda)
+                atom_index_path.append(None)
+                coupling_path.append(np.asarray(couplings[k], dtype=float).copy())
+            continue
+
+        lifted_tangent = np.asarray(lifted_tangents[k], dtype=float)
         if lifted_tangent.shape != (current_lambda.n_samples, current_lambda.d + 1):
             raise ValueError(
                 f"lifted_tangents[{k}] must have shape ({current_lambda.n_samples}, {current_lambda.d + 1})"
             )
-
-        if show_progress:
-            print(f"Transporting step {k + 1}/{len(lifted_tangents)}...")
-
-        next_lambda = lambda_list[k + 1]
         mapped_lambda = _cone_exponential_map_step(current_lambda, lifted_tangent, step_size)
         mapped_atom_indices = _resolve_cone_atom_map(
             mapped_lambda,
             next_lambda,
-            tol=alignment_tol,
+            tol=1e-8, # hard code the tolerance here since it's an internal consistency check within the transport loop
         )
         next_tangent = np.zeros_like(mapped_lambda.to_cone_samples())
 
@@ -1814,12 +1997,14 @@ def cone_wasserstein_parallel_transport(
             tangent_path.append(transported_tangent.copy())
             mapped_lambda_path.append(mapped_lambda)
             atom_index_path.append(mapped_atom_indices.copy())
+            coupling_path.append(None)
 
     if return_path:
         return transported_tangent, {
             "tangent_path": tangent_path,
             "mapped_lambda_path": mapped_lambda_path,
             "mapped_atom_indices": atom_index_path,
+            "coupling_path": coupling_path,
         }
     return transported_tangent
 
@@ -1839,20 +2024,19 @@ def hk_parallel_transport(
     let_max_iterations: int = 500,
     let_stop_threshold: float = 1e-8,
     let_reg_m: float = 1.0,
-    approximation_mode: str = "barycentric",
+    radial_aggregation_mode: str = "mass_preserving",
     compression_max_atoms: Optional[int] = None,
     compression_kmeans_iterations: int = 20,
-    alignment_tol: float = 1e-2,
+    alignment_tol: float = 1e-8,
     return_alignment_diagnostics: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Empirical HK parallel transport via the paper's stepwise cone transport scheme.
 
     This follows Algorithm ``Approximate HK parallel transport via cone
-    transport`` in ``main.tex`` using the lifted path and lifted tangent fields
-    returned by ``isometric_lift`` as the single source of truth for the
-    characteristic recursion. Each local step map is the cone exponential of
-    the lifted tangent over one time step.
+    transport`` in ``main.tex`` using the lifted path and retained local LET
+    couplings returned by ``isometric_lift`` as the single source of truth for
+    the characteristic recursion.
 
     The Wasserstein tangent projection ``Pi_{lambda_t}`` appearing after each
     local cone transport step in the paper is intentionally omitted here, per the
@@ -1867,7 +2051,7 @@ def hk_parallel_transport(
     if N <= 0:
         raise ValueError("N must be positive")
 
-    lambda_list, _, lifted_tangents = isometric_lift(
+    lambda_list, _, local_steps = isometric_lift(
         mu0,
         mu1,
         N,
@@ -1876,11 +2060,12 @@ def hk_parallel_transport(
         let_max_iterations=let_max_iterations,
         let_stop_threshold=let_stop_threshold,
         let_reg_m=let_reg_m,
-        approximation_mode=approximation_mode,
+        radial_aggregation_mode=radial_aggregation_mode,
         compression_max_atoms=compression_max_atoms,
         compression_kmeans_iterations=compression_kmeans_iterations,
-        return_tangents=True,
+        return_steps=True,
     )
+    local_couplings = [step.coupling for step in local_steps]
     current_lambda = lambda_list[0]
     cone_tangent0 = lift_tangent(
         u0,
@@ -1889,8 +2074,9 @@ def hk_parallel_transport(
     )
     transported_tangent = cone_wasserstein_parallel_transport(
         lambda_list,
-        lifted_tangents,
+        None,
         cone_tangent0,
+        couplings=local_couplings,
         step_size=1.0 / N,
         alignment_tol=alignment_tol,
         return_path=False,
@@ -1913,7 +2099,7 @@ def hk_parallel_transport(
         return result
 
     try:
-        atom_indices = _align_samples_to_support(
+        atom_indices = align_samples_to_support(
             current_lambda.samples,
             mu1.samples,
             tol=alignment_tol,
@@ -1978,156 +2164,3 @@ def hk_distance(
         ground_dist,
     )
     return float(np.sqrt(max(energy, 0.0)))
-
-
-def hk_parallel_transport_1d_exact(
-    mu0: EmpiricalMeasure,
-    mu1: EmpiricalMeasure,
-    u0: Tuple[np.ndarray, np.ndarray],
-    let_solver: str = "pot_mm",
-    let_max_iterations: int = 500,
-    let_stop_threshold: float = 1e-8,
-    let_reg_m: float = 1.0,
-    alignment_tol: float = 1e-2,
-    return_alignment_diagnostics: bool = False,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Exact 1D HK parallel transport along the endpoint HK geodesic.
-
-    This uses the closed-form 1D cone transport formula in the normalization of
-    this module:
-        - HK tangents are (v, beta) with
-              partial_t mu + div(mu v) = 4 beta mu
-        - cone lifting is
-              (v, beta) -> (v, 2 r beta)
-
-    Exactness here means:
-        1. the endpoint LET coupling is supported on a map, and
-        2. there is no unmatched positive source or target mass,
-
-    i.e. exactly the regime already enforced by `_compute_exact_hk_log_step`
-    through `hk_logarithmic_map(..., allow_approximation=False)`.
-
-    In 1D, if theta_i = y_i - x_i is the signed source-to-target displacement and
-    q_i is the exact radial update from the HK logarithmic map, then with
-        A_0 = u0_i,   B_0 = 2 beta0_i,
-    the transported cone-frame quantities satisfy
-        A_1 = cos(theta_i) A_0 - sin(theta_i) B_0,
-        B_1 = sin(theta_i) A_0 + cos(theta_i) B_0,
-    and since the final radius is q_i, the transported tangent is
-        v_1 = A_1 / q_i,
-        beta_1 = B_1 / (2 q_i).
-
-    The return value is a tangent on the atoms of `mu1`, using the same final
-    alignment/projection logic as `hk_parallel_transport`.
-    """
-    if mu0.d != 1 or mu1.d != 1:
-        raise ValueError("hk_parallel_transport_1d_exact requires one-dimensional measures")
-
-    v0, beta0 = _validate_hk_tangent(u0, mu0)
-
-    # Reuse the exact endpoint HK log-step already implemented in the module.
-    # This raises automatically if the exact Monge/no-unmatched-mass assumptions fail.
-    _, local_step = hk_logarithmic_map(
-        mu0,
-        mu1,
-        let_solver=let_solver,
-        let_max_iterations=let_max_iterations,
-        let_stop_threshold=let_stop_threshold,
-        let_reg_m=let_reg_m,
-        dt=1.0,
-        allow_approximation=True,
-        return_step=True,
-    )
-
-    target_positions = np.asarray(local_step.map_positions, dtype=float)
-    q = np.asarray(local_step.q, dtype=float)
-
-    # Signed 1D displacement angle along the base.
-    theta = target_positions[:, 0] - mu0.samples[:, 0]
-
-    # Initial cone-frame data at t=0.
-    # Since the source radii are 1 in the exact exp/log normalization used here:
-    #   A_0 = R_0 * u_0 = u_0
-    #   B_0 = 2 R_0 beta_0 = 2 beta_0
-    A0 = v0[:, 0].copy()
-    B0 = 2.0 * beta0.copy()
-
-    cos_theta = np.cos(theta)
-    sin_theta = np.sin(theta)
-
-    # Final lifted tangent components on the unaggregated deterministic lift.
-    # Spatial component is the HK velocity v_1.
-    v1 = np.zeros_like(A0)
-    radial1 = np.zeros_like(B0)
-
-    active = (mu0.weights > _TOL) & (q > _TOL)
-    if np.any(active):
-        A1 = cos_theta[active] * A0[active] - sin_theta[active] * B0[active]
-        B1 = sin_theta[active] * A0[active] + cos_theta[active] * B0[active]
-
-        v1[active] = A1 / q[active]
-        radial1[active] = B1
-
-    transported_cone_tangent = np.column_stack([v1, radial1])
-
-    # Final unaggregated lifted measure: same reference weights as mu0, updated radii q,
-    # projected support given by the exact HK endpoint map.
-    final_lambda = ConeMeasure(
-        samples=target_positions.copy(),
-        radii=q.copy(),
-        weights=mu0.weights.copy(),
-    )
-
-    # Mirror the final projection/alignment logic of hk_parallel_transport.
-    if final_lambda.n_samples == mu1.n_samples and np.allclose(
-        final_lambda.samples, mu1.samples, atol=1e-8, rtol=0.0
-    ):
-        result = project_tangent(transported_cone_tangent, final_lambda)
-        if return_alignment_diagnostics:
-            return result, {
-                "alignment_succeeded": True,
-                "transported_support": final_lambda.samples.copy(),
-                "target_support": mu1.samples.copy(),
-                "nearest_neighbor_distances": np.zeros(final_lambda.n_samples, dtype=float),
-                "alignment_tol": alignment_tol,
-            }
-        return result
-
-    try:
-        atom_indices = _align_samples_to_support(
-            final_lambda.samples,
-            mu1.samples,
-            tol=alignment_tol,
-        )
-    except ValueError:
-        tree = cKDTree(mu1.samples)
-        distances, _ = tree.query(final_lambda.samples, k=1)
-        diagnostics = {
-            "alignment_succeeded": False,
-            "transported_support": final_lambda.samples.copy(),
-            "target_support": mu1.samples.copy(),
-            "nearest_neighbor_distances": np.asarray(distances, dtype=float),
-            "alignment_tol": alignment_tol,
-        }
-        if return_alignment_diagnostics:
-            return None, diagnostics
-        raise
-
-    result = project_tangent(
-        transported_cone_tangent,
-        final_lambda,
-        atom_indices=atom_indices,
-        n_base_points=mu1.n_samples,
-    )
-    if return_alignment_diagnostics:
-        tree = cKDTree(mu1.samples)
-        distances, _ = tree.query(final_lambda.samples, k=1)
-        return result, {
-            "alignment_succeeded": True,
-            "transported_support": final_lambda.samples.copy(),
-            "target_support": mu1.samples.copy(),
-            "nearest_neighbor_distances": np.asarray(distances, dtype=float),
-            "alignment_tol": alignment_tol,
-        }
-    return result
