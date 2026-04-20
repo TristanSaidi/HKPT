@@ -44,6 +44,12 @@ def _maybe_tqdm(iterable, **kwargs):
     return tqdm(iterable, **kwargs)
 
 
+
+def _validate_scale(scale: float) -> float:
+    scale = float(scale)
+    if scale <= 0:
+        raise ValueError("scale must be positive")
+    return scale
 # ============================================================================
 # Utility classes
 # ============================================================================
@@ -182,22 +188,32 @@ def entropy_function(rho: np.ndarray) -> np.ndarray:
     return result
 
 
-def transport_cost(dist: float) -> float:
-    """c(L) = -2 log(cos(L)) for L < pi/2, infinity otherwise."""
-    if dist >= np.pi / 2:
+def transport_cost(dist: float, scale: float = 1.0) -> float:
+    """Scaled LET cost lambda^2 c(dist/lambda) for c(L) = -2 log(cos L)."""
+    scale = _validate_scale(scale)
+    scaled_dist = dist / scale
+    if scaled_dist >= np.pi / 2:
         return np.inf
-    return float(-2.0 * np.log(np.cos(dist)))
-
+    return float(scale**2 * (-2.0 * np.log(np.cos(scaled_dist))))
 
 def _pairwise_transport_cost(
-    mu0: EmpiricalMeasure, mu1: EmpiricalMeasure
+    mu0: EmpiricalMeasure,
+    mu1: EmpiricalMeasure,
+    scale: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
+    scale = _validate_scale(scale)
     ground_dist = cdist(mu0.samples, mu1.samples, metric="euclidean")
     cost_matrix = np.full_like(ground_dist, np.inf, dtype=float)
-    admissible = ground_dist < (np.pi / 2)
-    cost_matrix[admissible] = -2.0 * np.log(np.cos(ground_dist[admissible]))
-    return ground_dist, cost_matrix
+    admissible = (ground_dist / scale) < (np.pi / 2)
+    if np.any(admissible & ((ground_dist / scale) > (np.pi / 2 - 1e-6))):
+        warnings.warn(
+            "Some admissible pairs have scaled distances close to pi/2, which may lead to numerical instability in the cost."
+        )
 
+    cost_matrix[admissible] = scale**2 * (
+        -2.0 * np.log(np.cos(ground_dist[admissible] / scale))
+    )
+    return ground_dist, cost_matrix
 
 def _discrete_entropy_term(marginal: np.ndarray, reference: np.ndarray) -> float:
     if np.any((reference <= _TOL) & (marginal > _TOL)):
@@ -219,20 +235,24 @@ def let_functional(
     pi0_marginal: np.ndarray,
     pi1_marginal: np.ndarray,
     ground_dist: np.ndarray,
+    scale: float = 1.0,
 ) -> float:
-    """Evaluate the discrete LET functional."""
+    """Evaluate the scaled discrete LET functional."""
+    scale = _validate_scale(scale)
     cost_matrix = np.full_like(ground_dist, np.inf, dtype=float)
-    admissible = ground_dist < (np.pi / 2)
-    cost_matrix[admissible] = -2.0 * np.log(np.cos(ground_dist[admissible]))
+    admissible = (ground_dist / scale) < (np.pi / 2)
+    cost_matrix[admissible] = scale**2 * (
+        -2.0 * np.log(np.cos(ground_dist[admissible] / scale))
+    )
 
     if np.any((~admissible) & (pi_matrix > _TOL)):
         return np.inf
 
-    term1 = _discrete_entropy_term(pi0_marginal, mu0.weights)
-    term2 = _discrete_entropy_term(pi1_marginal, mu1.weights)
+    scale_sq = scale**2
+    term1 = scale_sq * _discrete_entropy_term(pi0_marginal, mu0.weights)
+    term2 = scale_sq * _discrete_entropy_term(pi1_marginal, mu1.weights)
     term3 = float(np.sum(pi_matrix[admissible] * cost_matrix[admissible]))
     return term1 + term2 + term3
-
 
 def _let_objective_and_gradient(
     coupling_values: np.ndarray,
@@ -243,7 +263,10 @@ def _let_objective_and_gradient(
     mu1_weights: np.ndarray,
     n0: int,
     n1: int,
+    scale: float = 1.0,
 ) -> Tuple[float, np.ndarray]:
+    scale = _validate_scale(scale)
+    scale_sq = scale**2
     row_mass = np.bincount(row_idx, weights=coupling_values, minlength=n0)
     col_mass = np.bincount(col_idx, weights=coupling_values, minlength=n1)
 
@@ -252,7 +275,7 @@ def _let_objective_and_gradient(
     if not np.isfinite(term1) or not np.isfinite(term2):
         return np.inf, np.full_like(coupling_values, np.inf)
 
-    objective = term1 + term2 + float(np.dot(coupling_values, cost_values))
+    objective = scale_sq * (term1 + term2) + float(np.dot(coupling_values, cost_values))
 
     row_log = np.zeros(n0, dtype=float)
     positive_row_ref = mu0_weights > _TOL
@@ -266,22 +289,23 @@ def _let_objective_and_gradient(
         np.maximum(col_mass[positive_col_ref], _TOL) / mu1_weights[positive_col_ref]
     )
 
-    gradient = row_log[row_idx] + col_log[col_idx] + cost_values
+    gradient = scale_sq * (row_log[row_idx] + col_log[col_idx]) + cost_values
     return objective, gradient
-
 
 def solve_let_unbalanced_transport_lbfgsb(
     mu0: EmpiricalMeasure,
     mu1: EmpiricalMeasure,
     max_iterations: int = 500,
     stop_threshold: float = 1e-8,
+    scale: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Solve the discrete LET problem directly over the coupling matrix via L-BFGS-B.
+    Solve the scaled discrete LET problem directly over the coupling matrix via L-BFGS-B.
     """
+    scale = _validate_scale(scale)
     n0 = mu0.n_samples
     n1 = mu1.n_samples
-    ground_dist, cost_matrix = _pairwise_transport_cost(mu0, mu1)
+    ground_dist, cost_matrix = _pairwise_transport_cost(mu0, mu1, scale=scale)
 
     feasible = np.isfinite(cost_matrix)
     feasible &= mu0.weights[:, np.newaxis] > _TOL
@@ -293,16 +317,24 @@ def solve_let_unbalanced_transport_lbfgsb(
     row_idx, col_idx = np.nonzero(feasible)
     cost_values = cost_matrix[feasible]
 
-    scale = max(mu0.total_mass(), mu1.total_mass(), 1.0)
+    init_scale = max(mu0.total_mass(), mu1.total_mass(), 1.0)
     initial = (
-        (mu0.weights[row_idx] * mu1.weights[col_idx]) / scale
+        (mu0.weights[row_idx] * mu1.weights[col_idx]) / init_scale
         * np.exp(-np.minimum(cost_values, 50.0))
     )
     initial = np.maximum(initial, 1e-16)
 
     def objective(values: np.ndarray) -> Tuple[float, np.ndarray]:
         return _let_objective_and_gradient(
-            values, row_idx, col_idx, cost_values, mu0.weights, mu1.weights, n0, n1
+            values,
+            row_idx,
+            col_idx,
+            cost_values,
+            mu0.weights,
+            mu1.weights,
+            n0,
+            n1,
+            scale=scale,
         )
 
     result = minimize(
@@ -328,12 +360,12 @@ def solve_let_unbalanced_transport_lbfgsb(
         pi.sum(axis=1),
         pi.sum(axis=0),
         ground_dist,
+        scale=scale,
     )
     if not np.isfinite(final_energy):
         raise RuntimeError("LET optimizer returned a coupling with infinite energy")
 
     return pi, cost_matrix
-
 
 def solve_let_unbalanced_transport_pot(
     mu0: EmpiricalMeasure,
@@ -341,22 +373,21 @@ def solve_let_unbalanced_transport_pot(
     max_iterations: int = 500,
     stop_threshold: float = 1e-8,
     reg_m: float = 1.0,
+    scale: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Solve the discrete LET problem with POT's non-entropic MM unbalanced solver.
-
-    This backend matches the discrete LET objective when all pairwise distances
-    are strictly below pi/2, so the cost matrix is finite everywhere.
+    Solve the scaled discrete LET problem with POT's non-entropic MM unbalanced solver.
     """
+    scale = _validate_scale(scale)
     if ot is None:
         raise ImportError(
             "POT is required for method='pot_mm'. Install it with `pip install POT`."
         )
 
-    ground_dist, cost_matrix = _pairwise_transport_cost(mu0, mu1)
+    ground_dist, cost_matrix = _pairwise_transport_cost(mu0, mu1, scale=scale)
     if np.any(~np.isfinite(cost_matrix)):
         raise ValueError(
-            "method='pot_mm' requires all pairwise distances to stay below pi/2 so "
+            "method='pot_mm' requires all pairwise distances to stay below pi/2 in the scaled metric so "
             "the LET cost matrix is finite everywhere. Use method='lbfgsb' otherwise."
         )
 
@@ -364,7 +395,7 @@ def solve_let_unbalanced_transport_pot(
         mu0.weights,
         mu1.weights,
         cost_matrix,
-        reg_m=reg_m,
+        reg_m=reg_m * scale**2,
         reg=0.0,
         div="kl",
         numItermax=max_iterations,
@@ -380,12 +411,12 @@ def solve_let_unbalanced_transport_pot(
         pi.sum(axis=1),
         pi.sum(axis=0),
         ground_dist,
+        scale=scale,
     )
     if not np.isfinite(final_energy):
         raise RuntimeError("POT mm_unbalanced returned a coupling with infinite energy")
 
     return pi, cost_matrix
-
 
 def solve_let_unbalanced_transport_pot_entropic(
     mu0: EmpiricalMeasure,
@@ -394,10 +425,12 @@ def solve_let_unbalanced_transport_pot_entropic(
     max_iterations: int = 500,
     stop_threshold: float = 1e-8,
     reg_m: float = 1.0,
+    scale: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Solve the discrete LET problem with POT's entropic unbalanced Sinkhorn solver.
+    Solve the scaled discrete LET problem with POT's entropic unbalanced Sinkhorn solver.
     """
+    scale = _validate_scale(scale)
     if ot is None:
         raise ImportError(
             "POT is required for method='pot_sinkhorn'. Install it with `pip install POT`."
@@ -405,10 +438,10 @@ def solve_let_unbalanced_transport_pot_entropic(
     if entropy_reg <= 0:
         raise ValueError("entropy_reg must be positive for method='pot_sinkhorn'")
 
-    ground_dist, cost_matrix = _pairwise_transport_cost(mu0, mu1)
+    ground_dist, cost_matrix = _pairwise_transport_cost(mu0, mu1, scale=scale)
     if np.any(~np.isfinite(cost_matrix)):
         raise ValueError(
-            "method='pot_sinkhorn' requires all pairwise distances to stay below pi/2 so "
+            "method='pot_sinkhorn' requires all pairwise distances to stay below pi/2 in the scaled metric so "
             "the LET cost matrix is finite everywhere. Use method='lbfgsb' otherwise."
         )
 
@@ -416,8 +449,8 @@ def solve_let_unbalanced_transport_pot_entropic(
         mu0.weights,
         mu1.weights,
         cost_matrix,
-        reg=entropy_reg,
-        reg_m=reg_m,
+        reg=entropy_reg * scale**2,
+        reg_m=reg_m * scale**2,
         numItermax=max_iterations,
         stopThr=stop_threshold,
     )
@@ -431,12 +464,12 @@ def solve_let_unbalanced_transport_pot_entropic(
         pi.sum(axis=1),
         pi.sum(axis=0),
         ground_dist,
+        scale=scale,
     )
     if not np.isfinite(final_energy):
         raise RuntimeError("POT sinkhorn_unbalanced returned a coupling with infinite energy")
 
     return pi, cost_matrix
-
 
 def solve_let_unbalanced_transport(
     mu0: EmpiricalMeasure,
@@ -446,6 +479,7 @@ def solve_let_unbalanced_transport(
     method: str = "pot_mm",
     stop_threshold: float = 1e-8,
     reg_m: float = 1.0,
+    scale: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Solve the discrete LET problem with a selectable backend.
@@ -462,6 +496,7 @@ def solve_let_unbalanced_transport(
             max_iterations=max_iterations,
             stop_threshold=stop_threshold,
             reg_m=reg_m,
+            scale=scale,
         )
     if method == "pot_sinkhorn":
         return solve_let_unbalanced_transport_pot_entropic(
@@ -471,6 +506,7 @@ def solve_let_unbalanced_transport(
             max_iterations=max_iterations,
             stop_threshold=stop_threshold,
             reg_m=reg_m,
+            scale=scale,
         )
     if method == "lbfgsb":
         return solve_let_unbalanced_transport_lbfgsb(
@@ -478,9 +514,9 @@ def solve_let_unbalanced_transport(
             mu1,
             max_iterations=max_iterations,
             stop_threshold=stop_threshold,
+            scale=scale,
         )
     raise ValueError("method must be one of 'pot_mm', 'pot_sinkhorn', or 'lbfgsb'")
-
 
 # ============================================================================
 # Cone geometry helpers
@@ -497,20 +533,30 @@ def project_from_cone(cone_sample: np.ndarray) -> Tuple[np.ndarray, float]:
 
 
 def cone_distance(
-    x0: np.ndarray, r0: float, x1: np.ndarray, r1: float
+    x0: np.ndarray,
+    r0: float,
+    x1: np.ndarray,
+    r1: float,
+    scale: float = 1.0,
 ) -> float:
-    theta = min(np.linalg.norm(np.asarray(x1) - np.asarray(x0)), np.pi)
+    scale = _validate_scale(scale)
+    theta = min(np.linalg.norm(np.asarray(x1) - np.asarray(x0)) / scale, np.pi)
     return float(np.sqrt(max(r0 * r0 + r1 * r1 - 2.0 * r0 * r1 * np.cos(theta), 0.0)))
 
-
 def cone_geodesic_step(
-    x0: np.ndarray, r0: float, x1: np.ndarray, r1: float, s: float
+    x0: np.ndarray,
+    r0: float,
+    x1: np.ndarray,
+    r1: float,
+    s: float,
+    scale: float = 1.0,
 ) -> Tuple[np.ndarray, float]:
     if s <= 0.0:
         return np.asarray(x0, dtype=float).copy(), float(r0)
     if s >= 1.0:
         return np.asarray(x1, dtype=float).copy(), float(r1)
 
+    scale = _validate_scale(scale)
     x0 = np.asarray(x0, dtype=float)
     x1 = np.asarray(x1, dtype=float)
 
@@ -521,7 +567,7 @@ def cone_geodesic_step(
     if r1 <= _TOL:
         return x0.copy(), float((1.0 - s) * r0)
 
-    theta = min(np.linalg.norm(x1 - x0), np.pi)
+    theta = min(np.linalg.norm(x1 - x0) / scale, np.pi)
     cos_theta = np.cos(theta)
     radius_sq = (
         (1.0 - s) ** 2 * r0**2
@@ -539,8 +585,11 @@ def cone_geodesic_step(
     position = (1.0 - rho) * x0 + rho * x1
     return position, radius
 
-
-def interpolate_lifted_measure(coupling: LiftedCoupling, s: float) -> ConeMeasure:
+def interpolate_lifted_measure(
+    coupling: LiftedCoupling,
+    s: float,
+    scale: float = 1.0,
+) -> ConeMeasure:
     positions = np.zeros_like(coupling.source_positions)
     radii = np.zeros_like(coupling.source_radii)
 
@@ -551,10 +600,10 @@ def interpolate_lifted_measure(coupling: LiftedCoupling, s: float) -> ConeMeasur
             coupling.target_positions[idx],
             coupling.target_radii[idx],
             s,
+            scale=scale,
         )
 
     return ConeMeasure(positions, radii, coupling.weights.copy())
-
 
 def project_cone_measure(cone_measure: ConeMeasure) -> EmpiricalMeasure:
     projected_weights = cone_measure.weights * cone_measure.radii**2
@@ -941,6 +990,7 @@ def let_lift(
     let_max_iterations: int = 500,
     let_stop_threshold: float = 1e-8,
     let_reg_m: float = 1.0,
+    scale: float = 1.0,
 ) -> Tuple[list, list]:
     """
     Build the discrete cone path induced directly by the endpoint LET lift.
@@ -948,6 +998,7 @@ def let_lift(
     if N <= 0:
         raise ValueError("N must be positive")
 
+    scale = _validate_scale(scale)
     pi, _ = solve_let_unbalanced_transport(
         mu0,
         mu1,
@@ -956,22 +1007,21 @@ def let_lift(
         method=let_solver,
         stop_threshold=let_stop_threshold,
         reg_m=let_reg_m,
+        scale=scale,
     )
     coupling = build_optimal_lifted_coupling(mu0, mu1, pi)
 
     lambda_list = []
     radii_list = []
     for s in np.linspace(0.0, 1.0, N + 1):
-        cone_measure = interpolate_lifted_measure(coupling, float(s))
+        cone_measure = interpolate_lifted_measure(coupling, float(s), scale=scale)
         lambda_list.append(cone_measure)
         radii_list.append(cone_measure.radii.copy())
-    # obtain total masses and check that they are the same
     total_masses = [np.sum(cone_measure.weights) for cone_measure in lambda_list]
     if not np.allclose(total_masses, total_masses[0], atol=_TOL):
         raise RuntimeError("Inconsistent total masses along the lifted path")
 
     return lambda_list, radii_list
-
 
 def _compute_local_hk_step(
     mu_source: EmpiricalMeasure,
@@ -979,7 +1029,9 @@ def _compute_local_hk_step(
     pi: np.ndarray,
     dt: float,
     approximation_mode: str = "barycentric",
+    scale: float = 1.0,
 ) -> LocalHKStep:
+    scale = _validate_scale(scale)
     row_mass = pi.sum(axis=1)
     col_mass = pi.sum(axis=0)
     positive_rows = row_mass > _TOL
@@ -1003,9 +1055,7 @@ def _compute_local_hk_step(
             argmax_targets = np.argmax(pi[positive_rows], axis=1)
             conditional[np.arange(len(argmax_targets)), argmax_targets] = 1.0
         else:
-            raise ValueError(
-                "approximation_mode must be 'barycentric' or 'argmax'"
-            )
+            raise ValueError("approximation_mode must be 'barycentric' or 'argmax'")
 
         source_samples = mu_source.samples[positive_rows]
         source_density = u_source[positive_rows]
@@ -1014,7 +1064,6 @@ def _compute_local_hk_step(
         distance_edge = np.linalg.norm(displacement_edge, axis=2)
 
         q_edge = np.zeros_like(distance_edge)
-        valid_edge_cols = positive_cols[np.newaxis, :]
         q_edge[:, positive_cols] = np.sqrt(
             np.maximum(
                 u_target[positive_cols][np.newaxis, :] / source_density[:, np.newaxis],
@@ -1027,19 +1076,19 @@ def _compute_local_hk_step(
         if np.any(moving_edges):
             edge_speed = np.zeros_like(distance_edge)
             edge_speed[moving_edges] = (
-                q_edge[moving_edges] * np.sin(distance_edge[moving_edges])
+                scale * q_edge[moving_edges] * np.sin(distance_edge[moving_edges] / scale)
             ) / (dt * distance_edge[moving_edges])
             edge_velocity[moving_edges] = (
                 edge_speed[moving_edges][:, np.newaxis] * displacement_edge[moving_edges]
             )
 
-        edge_beta = 0.5 / dt * (q_edge * np.cos(distance_edge) - 1.0)
+        edge_beta = 0.5 / dt * (q_edge * np.cos(distance_edge / scale) - 1.0)
 
         v[positive_rows] = np.einsum("ij,ijd->id", conditional, edge_velocity)
         beta[positive_rows] = np.sum(conditional * edge_beta, axis=1)
 
     speeds = np.linalg.norm(v, axis=1)
-    a_t = dt * speeds
+    a_t = dt * speeds / scale
     b_t = 1.0 + 2.0 * dt * beta
     q = np.sqrt(a_t**2 + b_t**2)
 
@@ -1049,7 +1098,7 @@ def _compute_local_hk_step(
         directions = np.zeros_like(v)
         directions[moving] = v[moving] / speeds[moving, np.newaxis]
         phi_t = np.arctan2(a_t[moving], b_t[moving])
-        barycenters[moving] += directions[moving] * phi_t[:, np.newaxis]
+        barycenters[moving] += directions[moving] * (scale * phi_t)[:, np.newaxis]
 
     return LocalHKStep(
         map_positions=barycenters,
@@ -1061,20 +1110,17 @@ def _compute_local_hk_step(
         coupling=np.asarray(pi, dtype=float),
     )
 
-
 def _compute_exact_hk_log_step(
     mu_source: EmpiricalMeasure,
     mu_target: EmpiricalMeasure,
     pi: np.ndarray,
     dt: float,
+    scale: float = 1.0,
 ) -> LocalHKStep:
     """
     Exact discrete HK log step under the paper's Monge-map assumptions.
-
-    This requires the LET coupling to be supported on a map and to have no
-    unmatched source or target mass, mirroring the assumptions in the explicit
-    HK log/exp formulas from ``main.tex``.
     """
+    scale = _validate_scale(scale)
     row_mass = pi.sum(axis=1)
     col_mass = pi.sum(axis=0)
     positive_rows = row_mass > _TOL
@@ -1125,10 +1171,12 @@ def _compute_exact_hk_log_step(
     v = np.zeros_like(mu_source.samples)
     moving = distance > _TOL
     if np.any(moving):
-        speed_factor = (q[moving] * np.sin(distance[moving])) / (dt * distance[moving])
+        speed_factor = (
+            scale * q[moving] * np.sin(distance[moving] / scale)
+        ) / (dt * distance[moving])
         v[moving] = speed_factor[:, np.newaxis] * displacement[moving]
 
-    beta = 0.5 / dt * (q * np.cos(distance) - 1.0)
+    beta = 0.5 / dt * (q * np.cos(distance / scale) - 1.0)
     return LocalHKStep(
         map_positions=map_positions,
         q=q,
@@ -1139,7 +1187,6 @@ def _compute_exact_hk_log_step(
         coupling=np.asarray(pi, dtype=float),
     )
 
-
 def hk_logarithmic_map(
     mu_source: EmpiricalMeasure,
     mu_target: EmpiricalMeasure,
@@ -1148,31 +1195,20 @@ def hk_logarithmic_map(
     let_max_iterations: int = 500,
     let_stop_threshold: float = 1e-8,
     let_reg_m: float = 1.0,
+    scale: float = 1.0,
     dt: float = 1.0,
     allow_approximation: bool = False,
     approximation_mode: str = "barycentric",
     return_step: bool = False,
 ):
     """
-    Empirical HK logarithmic map from ``mu_source`` to ``mu_target``.
-
-    This exposes the explicit source-supported HK tangent from ``main.tex`` when
-    the LET coupling is supported on a map and there is no unmatched mass. If
-    those assumptions fail, the function raises by default because the explicit
-    HK log/exp identities need not hold. Set ``allow_approximation=True`` to use
-    the empirical approximation employed internally by the isometric-lift and
-    parallel-transport routines. ``approximation_mode='barycentric'`` averages
-    edgewise HK tangent contributions row-wise, while
-    ``approximation_mode='argmax'`` first projects each row to its largest-mass
-    target.
-
-    The returned tangent ``(v, beta)`` is supported on the atoms of
-    ``mu_source``. The optional ``dt`` parameter rescales the tangent so that it
-    generates the local step over a time horizon of length ``dt``.
+    Empirical HK logarithmic map from ``mu_source`` to ``mu_target`` for the
+    base metric scaled by ``scale``.
     """
     if dt <= 0:
         raise ValueError("dt must be positive")
 
+    scale = _validate_scale(scale)
     pi, _ = solve_let_unbalanced_transport(
         mu_source,
         mu_target,
@@ -1181,9 +1217,10 @@ def hk_logarithmic_map(
         method=let_solver,
         stop_threshold=let_stop_threshold,
         reg_m=let_reg_m,
+        scale=scale,
     )
     try:
-        local_step = _compute_exact_hk_log_step(mu_source, mu_target, pi, dt)
+        local_step = _compute_exact_hk_log_step(mu_source, mu_target, pi, dt, scale=scale)
     except ValueError:
         if not allow_approximation:
             raise
@@ -1193,34 +1230,32 @@ def hk_logarithmic_map(
             pi,
             dt,
             approximation_mode=approximation_mode,
+            scale=scale,
         )
     tangent = (local_step.v, local_step.beta)
     if return_step:
         return tangent, local_step
     return tangent
 
-
 def hk_exponential_map(
     mu_source: EmpiricalMeasure,
     tangent_hk: Tuple[np.ndarray, np.ndarray],
     t: float = 1.0,
     aggregate: bool = True,
+    scale: float = 1.0,
 ) -> EmpiricalMeasure:
     """
-    Push an empirical HK tangent forward via the explicit closed-form HK exp map.
-
-    The input tangent is assumed to use the same normalization as the rest of
-    this module, namely the one induced by the continuity-reaction equation
-    ``partial_t mu + div(mu v) = 4 beta mu`` and the cone lifting
-    ``(v, beta) -> (v, 2 beta r)``.
+    Push an empirical HK tangent forward via the explicit closed-form HK exp map
+    for the base metric scaled by ``scale``.
     """
+    scale = _validate_scale(scale)
     if t < 0:
         raise ValueError("t must be non-negative")
 
     v, beta = _validate_hk_tangent(tangent_hk, mu_source)
     speeds = np.linalg.norm(v, axis=1)
 
-    a_t = t * speeds
+    a_t = t * speeds / scale
     b_t = 1.0 + 2.0 * t * beta
     q_t = np.sqrt(a_t**2 + b_t**2)
     phi_t = np.arctan2(a_t, b_t)
@@ -1230,7 +1265,7 @@ def hk_exponential_map(
     if np.any(moving):
         directions = np.zeros_like(v)
         directions[moving] = v[moving] / speeds[moving, np.newaxis]
-        transported_samples[moving] += directions[moving] * phi_t[moving, np.newaxis]
+        transported_samples[moving] += directions[moving] * (scale * phi_t[moving])[:, np.newaxis]
 
     transported_weights = mu_source.weights * q_t**2
     positive = transported_weights > _TOL
@@ -1242,7 +1277,6 @@ def hk_exponential_map(
         return aggregate_empirical_measure(image)
     return image
 
-
 def isometric_lift(
     mu0: EmpiricalMeasure,
     mu1: EmpiricalMeasure,
@@ -1252,6 +1286,7 @@ def isometric_lift(
     let_max_iterations: int = 500,
     let_stop_threshold: float = 1e-8,
     let_reg_m: float = 1.0,
+    scale: float = 1.0,
     approximation_mode: str = "barycentric",
     radial_aggregation_mode: str = "mass_preserving",
     compression_max_atoms: Optional[int] = None,
@@ -1261,21 +1296,11 @@ def isometric_lift(
 ) -> Tuple[list, list]:
     """
     Approximate Algorithm 1 from the paper using empirical local LET solves.
-
-    The endpoint LET lift is used only to produce target base measures at the
-    sampled times. The lifted path itself is then rebuilt recursively using the
-    local LET plans and radial updates from the isometric-lift algorithm. In the
-    finite-sample setting, each next lifted measure is supported exactly on the
-    next base support, and incoming radial contributions are aggregated there
-    according to the local coupling weights.
-    When multiple source atoms land on the same target point, the finite-sample
-    radial merge is controlled by ``radial_aggregation_mode``:
-    ``'mass_preserving'`` preserves projected base mass, while
-    ``'mean_radius'`` averages the incoming transported radii directly.
     """
     if N <= 0:
         raise ValueError("N must be positive")
 
+    scale = _validate_scale(scale)
     dt = 1.0 / N
     endpoint_lambdas, _ = let_lift(
         mu0,
@@ -1286,6 +1311,7 @@ def isometric_lift(
         let_max_iterations=let_max_iterations,
         let_stop_threshold=let_stop_threshold,
         let_reg_m=let_reg_m,
+        scale=scale,
     )
     if compression_max_atoms is None:
         compression_max_atoms = max(mu0.n_samples, mu1.n_samples)
@@ -1321,6 +1347,7 @@ def isometric_lift(
             method=let_solver,
             stop_threshold=let_stop_threshold,
             reg_m=let_reg_m,
+            scale=scale,
         )
 
         local_step = _compute_local_hk_step(
@@ -1329,6 +1356,7 @@ def isometric_lift(
             pi,
             dt,
             approximation_mode=approximation_mode,
+            scale=scale,
         )
         local_steps.append(local_step)
         lifted_tangents.append(
@@ -1354,7 +1382,6 @@ def isometric_lift(
     if return_steps:
         return lambda_list, radii_list, local_steps
     return lambda_list, radii_list
-
 
 # ============================================================================
 # Tangent lifting, projection, and transport
@@ -1456,15 +1483,20 @@ def project_tangent(
     return v, beta
 
 
-def _cone_cost_matrix(lambda0: ConeMeasure, lambda1: ConeMeasure) -> np.ndarray:
+def _cone_cost_matrix(
+    lambda0: ConeMeasure,
+    lambda1: ConeMeasure,
+    scale: float = 1.0,
+) -> np.ndarray:
     """
     Squared cone-distance cost matrix between two cone measures.
     """
+    scale = _validate_scale(scale)
     if lambda0.d != lambda1.d:
         raise ValueError("Cone measures must have the same ambient dimension")
 
     base_dist = cdist(lambda0.samples, lambda1.samples, metric="euclidean")
-    theta = np.minimum(base_dist, np.pi)
+    theta = np.minimum(base_dist / scale, np.pi)
     return (
         lambda0.radii[:, np.newaxis] ** 2
         + lambda1.radii[np.newaxis, :] ** 2
@@ -1474,14 +1506,15 @@ def _cone_cost_matrix(lambda0: ConeMeasure, lambda1: ConeMeasure) -> np.ndarray:
         * np.cos(theta)
     )
 
-
 def solve_balanced_cone_transport(
     lambda0: ConeMeasure,
     lambda1: ConeMeasure,
+    scale: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Solve the balanced Wasserstein transport problem directly on the cone.
     """
+    scale = _validate_scale(scale)
     if ot is None:
         raise ImportError("POT is required for balanced cone transport solves")
 
@@ -1493,10 +1526,9 @@ def solve_balanced_cone_transport(
         empty = np.zeros((lambda0.n_samples, lambda1.n_samples), dtype=float)
         return empty, empty
 
-    cost_matrix = _cone_cost_matrix(lambda0, lambda1)
+    cost_matrix = _cone_cost_matrix(lambda0, lambda1, scale=scale)
     coupling = ot.emd(lambda0.weights, lambda1.weights, cost_matrix)
     return np.asarray(coupling, dtype=float), cost_matrix
-
 
 def _deterministic_targets_from_cone_coupling(
     coupling: np.ndarray,
@@ -1538,11 +1570,13 @@ def _deterministic_targets_from_cone_coupling(
 def _cone_logarithmic_map_point(
     z0: Tuple[np.ndarray, float],
     z1: Tuple[np.ndarray, float],
+    scale: float = 1.0,
 ) -> Tuple[np.ndarray, float]:
     """
     Exact cone tangent sending ``z0`` to ``z1`` under the pointwise cone
-    exponential map at unit time.
+    exponential map at unit time for the base metric scaled by ``scale``.
     """
+    scale = _validate_scale(scale)
     x0, r0 = z0
     x1, r1 = z1
     x0 = np.asarray(x0, dtype=float)
@@ -1554,15 +1588,15 @@ def _cone_logarithmic_map_point(
         raise ValueError("cone logarithmic map is undefined here for zero source radius")
 
     displacement = x1 - x0
-    theta = min(np.linalg.norm(displacement), np.pi)
-    if theta <= _TOL:
+    dist = np.linalg.norm(displacement)
+    theta = min(dist / scale, np.pi)
+    if theta <= _TOL or dist <= _TOL:
         spatial = np.zeros_like(x0)
     else:
-        direction = displacement / theta
-        spatial = direction * ((r1 / r0) * np.sin(theta))
+        direction = displacement / dist
+        spatial = direction * (scale * (r1 / r0) * np.sin(theta))
     radial = r1 * np.cos(theta) - r0
     return spatial, float(radial)
-
 
 def _aggregate_cone_tangent_under_deterministic_map(
     cone_tangent: np.ndarray,
@@ -1613,14 +1647,11 @@ def _aggregate_cone_tangent_under_plan_coupling(
     current_lambda: ConeMeasure,
     next_lambda: ConeMeasure,
     coupling: np.ndarray,
+    scale: float = 1.0,
 ) -> np.ndarray:
     """
     Aggregate cone tangent vectors onto the next lifted measure using the local
     LET coupling retained during the isometric lift.
-
-    The source cone mass is split across target atoms in proportion to the
-    coupling row, parallel transported to the target cone atoms of
-    ``next_lambda``, and then averaged using those split reference masses.
     """
     cone_tangent = np.asarray(cone_tangent, dtype=float)
     coupling = np.asarray(coupling, dtype=float)
@@ -1631,8 +1662,6 @@ def _aggregate_cone_tangent_under_plan_coupling(
         raise ValueError("coupling shape must match current and next lifted measures")
 
     row_mass = coupling.sum(axis=1)
-    valid_rows = row_mass > _TOL
-
     aggregated = np.zeros((next_lambda.n_samples, current_lambda.d + 1), dtype=float)
     target_reference_mass = np.zeros(next_lambda.n_samples, dtype=float)
 
@@ -1651,6 +1680,7 @@ def _aggregate_cone_tangent_under_plan_coupling(
             cone_tangent[source_idx, -1],
             (current_lambda.samples[source_idx], current_lambda.radii[source_idx]),
             (next_lambda.samples[target_idx], next_lambda.radii[target_idx]),
+            scale=scale,
         )
         aggregated[target_idx, :-1] += edge_reference_mass * a1
         aggregated[target_idx, -1] += edge_reference_mass * b1
@@ -1659,7 +1689,6 @@ def _aggregate_cone_tangent_under_plan_coupling(
     positive_targets = target_reference_mass > _TOL
     aggregated[positive_targets] /= target_reference_mass[positive_targets, np.newaxis]
     return aggregated
-
 
 def _resolve_cone_atom_map(
     mapped_lambda: ConeMeasure,
@@ -1696,10 +1725,12 @@ def _cone_exponential_map_step(
     cone_measure: ConeMeasure,
     cone_tangent: np.ndarray,
     t: float,
+    scale: float = 1.0,
 ) -> ConeMeasure:
     """
     Apply the pointwise cone exponential map to a lifted tangent over time ``t``.
     """
+    scale = _validate_scale(scale)
     if t < 0:
         raise ValueError("t must be non-negative")
 
@@ -1719,7 +1750,7 @@ def _cone_exponential_map_step(
     positive_radii = cone_measure.radii > _TOL
     b_t = np.ones(cone_measure.n_samples, dtype=float)
     b_t[positive_radii] += t * radial[positive_radii] / cone_measure.radii[positive_radii]
-    a_t = t * speeds
+    a_t = t * speeds / scale
     q_t = np.sqrt(a_t**2 + b_t**2)
     phi_t = np.arctan2(a_t, b_t)
 
@@ -1727,22 +1758,22 @@ def _cone_exponential_map_step(
     if np.any(moving):
         directions = np.zeros_like(spatial)
         directions[moving] = spatial[moving] / speeds[moving, np.newaxis]
-        positions[moving] += directions[moving] * phi_t[moving, np.newaxis]
+        positions[moving] += directions[moving] * (scale * phi_t[moving])[:, np.newaxis]
 
     radii = cone_measure.radii * q_t
     return ConeMeasure(positions, radii, cone_measure.weights.copy())
-
 
 def cone_exponential_map(
     cone_measure: ConeMeasure,
     cone_tangent: np.ndarray,
     t: float = 1.0,
     aggregate: bool = False,
+    scale: float = 1.0,
 ) -> ConeMeasure:
     """
     Public cone exponential map for source-supported cone tangents.
     """
-    image = _cone_exponential_map_step(cone_measure, cone_tangent, t)
+    image = _cone_exponential_map_step(cone_measure, cone_tangent, t, scale=scale)
     if aggregate:
         return _aggregate_pushforward_cone(
             image.samples,
@@ -1751,16 +1782,16 @@ def cone_exponential_map(
         )
     return image
 
-
 def cone_logarithmic_map(
     lambda_source: ConeMeasure,
     lambda_target: ConeMeasure,
     approximation_mode: str = "argmax",
+    scale: float = 1.0,
 ) -> np.ndarray:
     """
     Empirical logarithmic map on the cone, supported on ``lambda_source``.
     """
-    coupling, _ = solve_balanced_cone_transport(lambda_source, lambda_target)
+    coupling, _ = solve_balanced_cone_transport(lambda_source, lambda_target, scale=scale)
     target_samples, target_radii = _deterministic_targets_from_cone_coupling(
         coupling,
         lambda_source,
@@ -1773,17 +1804,18 @@ def cone_logarithmic_map(
         spatial, radial = _cone_logarithmic_map_point(
             (lambda_source.samples[idx], lambda_source.radii[idx]),
             (target_samples[idx], target_radii[idx]),
+            scale=scale,
         )
         cone_tangent[idx, :-1] = spatial
         cone_tangent[idx, -1] = radial
     return cone_tangent
-
 
 def cone_wasserstein_geodesic(
     lambda0: ConeMeasure,
     lambda1: ConeMeasure,
     N: int,
     approximation_mode: str = "argmax",
+    scale: float = 1.0,
 ) -> Tuple[list, list]:
     """
     Build a deterministic cone-Wasserstein geodesic approximation and its local
@@ -1793,7 +1825,7 @@ def cone_wasserstein_geodesic(
         raise ValueError("N must be positive")
     dt = 1.0 / N
 
-    coupling, _ = solve_balanced_cone_transport(lambda0, lambda1)
+    coupling, _ = solve_balanced_cone_transport(lambda0, lambda1, scale=scale)
     target_samples, target_radii = _deterministic_targets_from_cone_coupling(
         coupling,
         lambda0,
@@ -1812,6 +1844,7 @@ def cone_wasserstein_geodesic(
                 target_samples[idx],
                 target_radii[idx],
                 float(s),
+                scale=scale,
             )
         lambda_list.append(ConeMeasure(positions, radii, lambda0.weights.copy()))
 
@@ -1822,21 +1855,22 @@ def cone_wasserstein_geodesic(
             spatial, radial = _cone_logarithmic_map_point(
                 (lambda_list[k].samples[idx], lambda_list[k].radii[idx]),
                 (lambda_list[k + 1].samples[idx], lambda_list[k + 1].radii[idx]),
+                scale=scale,
             )
             tangent[idx, :-1] = spatial / dt
             tangent[idx, -1] = radial / dt
         step_tangents.append(tangent)
     return lambda_list, step_tangents
 
-
-def cone_parallel_transport_explicit(
+def _cone_parallel_transport_explicit_unscaled(
     a0: np.ndarray,
     b0: float,
     z0: Tuple[np.ndarray, float],
     z1: Tuple[np.ndarray, float],
 ) -> Tuple[np.ndarray, float]:
     """
-    Explicit parallel transport along the cone geodesic joining z0 and z1.
+    Explicit parallel transport along the cone geodesic joining z0 and z1 in
+    the unscaled geometry.
     """
     x0, r0 = z0
     x1, r1 = z1
@@ -1851,7 +1885,7 @@ def cone_parallel_transport_explicit(
         return np.zeros_like(a0), 0.0
 
     theta = min(np.linalg.norm(x1 - x0), np.pi)
-    dist = cone_distance(x0, r0, x1, r1)
+    dist = cone_distance(x0, r0, x1, r1, scale=1.0)
     if dist <= _TOL:
         return a0.copy(), b0
 
@@ -1883,6 +1917,32 @@ def cone_parallel_transport_explicit(
     return a1, float(b1)
 
 
+def cone_parallel_transport_explicit(
+    a0: np.ndarray,
+    b0: float,
+    z0: Tuple[np.ndarray, float],
+    z1: Tuple[np.ndarray, float],
+    scale: float = 1.0,
+) -> Tuple[np.ndarray, float]:
+    """
+    Explicit parallel transport along the cone geodesic joining z0 and z1 for
+    the base metric scaled by ``scale``.
+    """
+    scale = _validate_scale(scale)
+    x0, r0 = z0
+    x1, r1 = z1
+    x0 = np.asarray(x0, dtype=float)
+    x1 = np.asarray(x1, dtype=float)
+    a0 = np.asarray(a0, dtype=float)
+
+    a1_scaled, b1 = _cone_parallel_transport_explicit_unscaled(
+        a0 / scale,
+        b0,
+        (x0 / scale, r0),
+        (x1 / scale, r1),
+    )
+    return scale * a1_scaled, b1
+
 def cone_wasserstein_parallel_transport(
     lambda_list: list,
     lifted_tangents: Optional[list],
@@ -1892,18 +1952,13 @@ def cone_wasserstein_parallel_transport(
     alignment_tol: float = 1e-2,
     return_path: bool = False,
     show_progress: bool = True,
+    scale: float = 1.0,
 ):
     """
     Run the cone-side Wasserstein parallel transport recursion induced by a
     lifted path.
-
-    This exposes the inner transport loop used by ``hk_parallel_transport`` so
-    the cone dynamics can be inspected without projecting back to the HK tangent
-    space. If ``couplings`` is provided, each step uses the retained local LET
-    coupling to split source reference mass, parallel transport edgewise, and
-    aggregate onto the next lifted support. Otherwise it falls back to the
-    tangent-induced deterministic map update.
     """
+    scale = _validate_scale(scale)
     if len(lambda_list) == 0:
         raise ValueError("lambda_list must be non-empty")
     n_steps = len(lambda_list) - 1
@@ -1920,10 +1975,7 @@ def cone_wasserstein_parallel_transport(
         raise ValueError("cone_tangent0 must have shape (lambda_list[0].n_samples, d + 1)")
 
     if step_size is None:
-        if len(lambda_list) == 1:
-            step_size = 0.0
-        else:
-            step_size = 1.0 / (len(lambda_list) - 1)
+        step_size = 0.0 if len(lambda_list) == 1 else 1.0 / (len(lambda_list) - 1)
     if step_size < 0:
         raise ValueError("step_size must be non-negative")
 
@@ -1944,6 +1996,7 @@ def cone_wasserstein_parallel_transport(
                 current_lambda,
                 next_lambda,
                 couplings[k],
+                scale=scale,
             )
             current_lambda = next_lambda
 
@@ -1959,11 +2012,16 @@ def cone_wasserstein_parallel_transport(
             raise ValueError(
                 f"lifted_tangents[{k}] must have shape ({current_lambda.n_samples}, {current_lambda.d + 1})"
             )
-        mapped_lambda = _cone_exponential_map_step(current_lambda, lifted_tangent, step_size)
+        mapped_lambda = _cone_exponential_map_step(
+            current_lambda,
+            lifted_tangent,
+            step_size,
+            scale=scale,
+        )
         mapped_atom_indices = _resolve_cone_atom_map(
             mapped_lambda,
             next_lambda,
-            tol=1e-8, # hard code the tolerance here since it's an internal consistency check within the transport loop
+            tol=1e-8,
         )
         next_tangent = np.zeros_like(mapped_lambda.to_cone_samples())
 
@@ -1981,6 +2039,7 @@ def cone_wasserstein_parallel_transport(
                 transported_tangent[idx, -1],
                 (current_lambda.samples[idx], current_lambda.radii[idx]),
                 (mapped_lambda.samples[idx], mapped_lambda.radii[idx]),
+                scale=scale,
             )
             next_tangent[idx, :-1] = a1
             next_tangent[idx, -1] = b1
@@ -2008,7 +2067,6 @@ def cone_wasserstein_parallel_transport(
         }
     return transported_tangent
 
-
 # ============================================================================
 # Main algorithms
 # ============================================================================
@@ -2024,6 +2082,7 @@ def hk_parallel_transport(
     let_max_iterations: int = 500,
     let_stop_threshold: float = 1e-8,
     let_reg_m: float = 1.0,
+    scale: float = 1.0,
     radial_aggregation_mode: str = "mass_preserving",
     compression_max_atoms: Optional[int] = None,
     compression_kmeans_iterations: int = 20,
@@ -2032,21 +2091,6 @@ def hk_parallel_transport(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Empirical HK parallel transport via the paper's stepwise cone transport scheme.
-
-    This follows Algorithm ``Approximate HK parallel transport via cone
-    transport`` in ``main.tex`` using the lifted path and retained local LET
-    couplings returned by ``isometric_lift`` as the single source of truth for
-    the characteristic recursion.
-
-    The Wasserstein tangent projection ``Pi_{lambda_t}`` appearing after each
-    local cone transport step in the paper is intentionally omitted here, per the
-    requested scope.
-
-    If ``return_alignment_diagnostics`` is ``True``, the function returns a pair
-    ``(transported_tangent, diagnostics)``. When the final empirical support
-    cannot be aligned to ``mu1`` within ``alignment_tol``, the tangent result is
-    ``None`` and the diagnostics dictionary contains the transported and target
-    point clouds so they can be inspected visually.
     """
     if N <= 0:
         raise ValueError("N must be positive")
@@ -2060,6 +2104,7 @@ def hk_parallel_transport(
         let_max_iterations=let_max_iterations,
         let_stop_threshold=let_stop_threshold,
         let_reg_m=let_reg_m,
+        scale=scale,
         radial_aggregation_mode=radial_aggregation_mode,
         compression_max_atoms=compression_max_atoms,
         compression_kmeans_iterations=compression_kmeans_iterations,
@@ -2081,6 +2126,7 @@ def hk_parallel_transport(
         alignment_tol=alignment_tol,
         return_path=False,
         show_progress=True,
+        scale=scale,
     )
     current_lambda = lambda_list[-1]
 
@@ -2136,7 +2182,6 @@ def hk_parallel_transport(
         }
     return result
 
-
 def hk_distance(
     mu0: EmpiricalMeasure,
     mu1: EmpiricalMeasure,
@@ -2144,8 +2189,9 @@ def hk_distance(
     let_max_iterations: int = 500,
     let_stop_threshold: float = 1e-8,
     let_reg_m: float = 1.0,
+    scale: float = 1.0,
 ) -> float:
-    """Compute the empirical HK distance from the discrete LET energy."""
+    """Compute the scaled empirical HK distance, i.e. scale * HK_{d/scale}."""
     pi, _ = solve_let_unbalanced_transport(
         mu0,
         mu1,
@@ -2153,8 +2199,9 @@ def hk_distance(
         method=let_solver,
         stop_threshold=let_stop_threshold,
         reg_m=let_reg_m,
+        scale=scale,
     )
-    ground_dist, _ = _pairwise_transport_cost(mu0, mu1)
+    ground_dist, _ = _pairwise_transport_cost(mu0, mu1, scale=scale)
     energy = let_functional(
         pi,
         mu0,
@@ -2162,5 +2209,6 @@ def hk_distance(
         pi.sum(axis=1),
         pi.sum(axis=0),
         ground_dist,
+        scale=scale,
     )
     return float(np.sqrt(max(energy, 0.0)))
